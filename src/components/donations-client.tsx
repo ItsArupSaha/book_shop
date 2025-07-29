@@ -1,4 +1,3 @@
-
 'use client';
 
 import * as React from 'react';
@@ -27,6 +26,8 @@ import { cn } from "@/lib/utils"
 import { RadioGroup, RadioGroupItem } from './ui/radio-group';
 import { Textarea } from './ui/textarea';
 import { ScrollArea } from './ui/scroll-area';
+import { Skeleton } from './ui/skeleton';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 
 const donationSchema = z.object({
   donorName: z.string().min(1, 'Donor name is required'),
@@ -38,26 +39,34 @@ const donationSchema = z.object({
 
 type DonationFormValues = z.infer<typeof donationSchema>;
 
-interface DonationsClientProps {
-    initialDonations: Donation[];
-    initialHasMore: boolean;
-}
-
-export function DonationsClient({ initialDonations, initialHasMore }: DonationsClientProps) {
-  const [donations, setDonations] = React.useState<Donation[]>(initialDonations);
-  const [hasMore, setHasMore] = React.useState(initialHasMore);
+export default function DonationsManagement() {
+  const [donations, setDonations] = React.useState<Donation[]>([]);
+  const [hasMore, setHasMore] = React.useState(true);
+  const [isInitialLoading, setIsInitialLoading] = React.useState(true);
   const [isLoadingMore, setIsLoadingMore] = React.useState(false);
   const [isDialogOpen, setIsDialogOpen] = React.useState(false);
   const [isDownloadDialogOpen, setIsDownloadDialogOpen] = React.useState(false);
   const [dateRange, setDateRange] = React.useState<DateRange | undefined>();
   const { toast } = useToast();
   const [isPending, startTransition] = React.useTransition();
+  
+  const loadInitialData = React.useCallback(async () => {
+    setIsInitialLoading(true);
+    const { donations: newDonations, hasMore: newHasMore } = await getDonationsPaginated({ pageLimit: 5 });
+    setDonations(newDonations);
+    setHasMore(newHasMore);
+    setIsInitialLoading(false);
+  }, []);
+
+  React.useEffect(() => {
+    loadInitialData();
+  }, [loadInitialData]);
 
   const handleLoadMore = async () => {
     if (!hasMore || isLoadingMore) return;
     setIsLoadingMore(true);
     const lastDonationId = donations[donations.length - 1]?.id;
-    const { donations: newDonations, hasMore: newHasMore } = await getDonationsPaginated({ pageLimit: 10, lastVisibleId: lastDonationId });
+    const { donations: newDonations, hasMore: newHasMore } = await getDonationsPaginated({ pageLimit: 5, lastVisibleId: lastDonationId });
     setDonations(prev => [...prev, ...newDonations]);
     setHasMore(newHasMore);
     setIsLoadingMore(false);
@@ -96,7 +105,6 @@ export function DonationsClient({ initialDonations, initialHasMore }: DonationsC
         return null;
     }
     
-    // For reports, we fetch all donations
     const allDonations = await getDonations();
     const from = dateRange.from;
     const to = dateRange.to || dateRange.from;
@@ -174,77 +182,96 @@ export function DonationsClient({ initialDonations, initialHasMore }: DonationsC
   };
 
   return (
-    <>
-      <div className="flex flex-col items-end gap-2">
-        <Button onClick={handleAddNew}>
-          <PlusCircle className="mr-2 h-4 w-4" /> Add New Donation
-        </Button>
-        <Dialog open={isDownloadDialogOpen} onOpenChange={setIsDownloadDialogOpen}>
-            <DialogTrigger asChild>
-                <Button variant="outline">
-                    <Download className="mr-2 h-4 w-4" /> Download Report
-                </Button>
-            </DialogTrigger>
-            <DialogContent className="sm:max-w-md">
-                <DialogHeader>
-                    <DialogTitle>Download Donations Report</DialogTitle>
-                    <DialogDescription>Select a date range to download your donation data.</DialogDescription>
-                </DialogHeader>
-                <ScrollArea className="max-h-[calc(100vh-20rem)] overflow-y-auto">
-                    <div className="py-4 flex flex-col items-center gap-4">
-                        <Calendar
-                            initialFocus
-                            mode="range"
-                            defaultMonth={dateRange?.from}
-                            selected={dateRange}
-                            onSelect={setDateRange}
-                            numberOfMonths={1}
-                        />
-                    </div>
-                </ScrollArea>
-                <DialogFooter className="gap-2 sm:justify-center pt-4 border-t">
-                  <Button variant="outline" onClick={handleDownloadPdf} disabled={!dateRange?.from}><FileText className="mr-2 h-4 w-4" /> Download PDF</Button>
-                  <Button variant="outline" onClick={handleDownloadCsv} disabled={!dateRange?.from}><FileSpreadsheet className="mr-2 h-4 w-4" /> Download CSV</Button>
-                </DialogFooter>
-            </DialogContent>
-        </Dialog>
-      </div>
-      
-      <div className="border rounded-md mt-4">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Date</TableHead>
-              <TableHead>Donor</TableHead>
-              <TableHead>Notes</TableHead>
-              <TableHead>Method</TableHead>
-              <TableHead className="text-right">Amount</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {donations.length > 0 ? donations.map((donation) => (
-              <TableRow key={donation.id}>
-                <TableCell>{format(new Date(donation.date), 'PPP')}</TableCell>
-                <TableCell className="font-medium">{donation.donorName}</TableCell>
-                <TableCell>{donation.notes}</TableCell>
-                <TableCell>{donation.paymentMethod}</TableCell>
-                <TableCell className="text-right">${donation.amount.toFixed(2)}</TableCell>
-              </TableRow>
-            )) : (
-              <TableRow>
-                <TableCell colSpan={5} className="text-center h-24 text-muted-foreground">No donations recorded yet.</TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </div>
-      {hasMore && (
-        <div className="flex justify-center mt-4">
-          <Button onClick={handleLoadMore} disabled={isLoadingMore}>
-            {isLoadingMore ? <><Loader2 className="mr-2 h-4 w-4 animate-spin"/> Loading...</> : 'Load More'}
-          </Button>
+    <Card className="animate-in fade-in-50">
+      <CardHeader>
+        <div className="flex justify-between items-start">
+          <div>
+            <CardTitle className="font-headline text-2xl">Donations</CardTitle>
+            <CardDescription>Record and view all donations received.</CardDescription>
+          </div>
+          <div className="flex flex-col items-end gap-2">
+            <Button onClick={handleAddNew}>
+              <PlusCircle className="mr-2 h-4 w-4" /> Add New Donation
+            </Button>
+            <Dialog open={isDownloadDialogOpen} onOpenChange={setIsDownloadDialogOpen}>
+                <DialogTrigger asChild>
+                    <Button variant="outline">
+                        <Download className="mr-2 h-4 w-4" /> Download Report
+                    </Button>
+                </DialogTrigger>
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>Download Donations Report</DialogTitle>
+                        <DialogDescription>Select a date range to download your donation data.</DialogDescription>
+                    </DialogHeader>
+                    <ScrollArea className="max-h-[calc(100vh-20rem)] overflow-y-auto">
+                        <div className="py-4 flex flex-col items-center gap-4">
+                            <Calendar
+                                initialFocus
+                                mode="range"
+                                defaultMonth={dateRange?.from}
+                                selected={dateRange}
+                                onSelect={setDateRange}
+                                numberOfMonths={1}
+                            />
+                        </div>
+                    </ScrollArea>
+                    <DialogFooter className="gap-2 sm:justify-center pt-4 border-t">
+                      <Button variant="outline" onClick={handleDownloadPdf} disabled={!dateRange?.from}><FileText className="mr-2 h-4 w-4" /> Download PDF</Button>
+                      <Button variant="outline" onClick={handleDownloadCsv} disabled={!dateRange?.from}><FileSpreadsheet className="mr-2 h-4 w-4" /> Download CSV</Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+          </div>
         </div>
-      )}
+      </CardHeader>
+      <CardContent>
+        <div className="border rounded-md">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Date</TableHead>
+                <TableHead>Donor</TableHead>
+                <TableHead>Notes</TableHead>
+                <TableHead>Method</TableHead>
+                <TableHead className="text-right">Amount</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+               {isInitialLoading ? (
+                  Array.from({ length: 5 }).map((_, i) => (
+                    <TableRow key={`skeleton-${i}`}>
+                      <TableCell><Skeleton className="h-5 w-3/4" /></TableCell>
+                      <TableCell><Skeleton className="h-5 w-2/4" /></TableCell>
+                      <TableCell><Skeleton className="h-5 w-full" /></TableCell>
+                      <TableCell><Skeleton className="h-5 w-1/4" /></TableCell>
+                      <TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell>
+                    </TableRow>
+                  ))
+                ) : donations.length > 0 ? donations.map((donation) => (
+                <TableRow key={donation.id}>
+                  <TableCell>{format(new Date(donation.date), 'PPP')}</TableCell>
+                  <TableCell className="font-medium">{donation.donorName}</TableCell>
+                  <TableCell>{donation.notes}</TableCell>
+                  <TableCell>{donation.paymentMethod}</TableCell>
+                  <TableCell className="text-right">${donation.amount.toFixed(2)}</TableCell>
+                </TableRow>
+              )) : (
+                <TableRow>
+                  <TableCell colSpan={5} className="text-center h-24 text-muted-foreground">No donations recorded yet.</TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
+        {hasMore && (
+          <div className="flex justify-center mt-4">
+            <Button onClick={handleLoadMore} disabled={isLoadingMore}>
+              {isLoadingMore ? <><Loader2 className="mr-2 h-4 w-4 animate-spin"/> Loading...</> : 'Load More'}
+            </Button>
+          </div>
+        )}
+      </CardContent>
 
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
         <DialogContent className="sm:max-w-md max-h-[90vh] flex flex-col">
@@ -369,6 +396,6 @@ export function DonationsClient({ initialDonations, initialHasMore }: DonationsC
           </Form>
         </DialogContent>
       </Dialog>
-    </>
+    </Card>
   );
 }

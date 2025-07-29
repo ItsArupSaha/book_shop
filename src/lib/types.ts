@@ -16,6 +16,7 @@ export type Customer = {
   whatsapp?: string;
   address: string;
   openingBalance: number;
+  dueBalance: number;
 };
 
 export type CustomerWithDue = Customer & {
@@ -29,6 +30,10 @@ export type Book = {
   productionPrice: number;
   sellingPrice: number;
   stock: number;
+};
+
+export type ClosingStock = Book & {
+  closingStock: number;
 };
 
 export type SaleItem = {

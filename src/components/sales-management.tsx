@@ -10,7 +10,7 @@ import { format } from 'date-fns';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import Papa from 'papaparse';
-import { getSalesPaginated, getBooks, getCustomers, addSale, getSales } from '@/lib/actions';
+import { getSalesPaginated, getBooks, getCustomers, addSale } from '@/lib/actions';
 
 import type { Sale, Book, Customer } from '@/lib/types';
 import { Button } from '@/components/ui/button';
@@ -19,7 +19,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, SelectPortal } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import { Separator } from '@/components/ui/separator';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
@@ -31,6 +31,7 @@ import type { DateRange } from 'react-day-picker';
 import { SaleMemo } from './sale-memo';
 import { ScrollArea } from './ui/scroll-area';
 import { DownloadSaleMemo } from './download-sale-memo';
+import { Skeleton } from './ui/skeleton';
 
 const saleItemSchema = z.object({
   bookId: z.string().min(1, 'Book is required'),
@@ -65,37 +66,69 @@ const saleFormSchema = z.object({
 
 type SaleFormValues = z.infer<typeof saleFormSchema>;
 
-interface SalesManagementProps {
-    initialSales: Sale[];
-    initialHasMore: boolean;
-    initialBooks: Book[];
-    initialCustomers: Customer[];
-}
-
-export default function SalesManagement({ initialSales, initialHasMore, initialBooks, initialCustomers }: SalesManagementProps) {
-  const [sales, setSales] = React.useState<Sale[]>(initialSales);
-  const [books, setBooks] = React.useState<Book[]>(initialBooks);
-  const [customers, setCustomers] = React.useState<Customer[]>(initialCustomers);
+export default function SalesManagement() {
+  const [sales, setSales] = React.useState<Sale[]>([]);
+  const [books, setBooks] = React.useState<Book[]>([]);
+  const [customers, setCustomers] = React.useState<Customer[]>([]);
   const [isDialogOpen, setIsDialogOpen] = React.useState(false);
   const [isDownloadDialogOpen, setIsDownloadDialogOpen] = React.useState(false);
   const [dateRange, setDateRange] = React.useState<DateRange | undefined>();
   const [completedSale, setCompletedSale] = React.useState<Sale | null>(null);
   const { toast } = useToast();
   const [isPending, startTransition] = React.useTransition();
+  const [isInitialLoading, setIsInitialLoading] = React.useState(true);
   const [isLoadingMore, setIsLoadingMore] = React.useState(false);
-  const [hasMoreSales, setHasMoreSales] = React.useState(initialHasMore);
+  const [hasMore, setHasMore] = React.useState(true);
+
+  const loadInitialData = React.useCallback(async () => {
+    setIsInitialLoading(true);
+    try {
+        const [{ sales: newSales, hasMore: newHasMore }, booksData, customersData] = await Promise.all([
+            getSalesPaginated({ pageLimit: 5 }),
+            getBooks(),
+            getCustomers(),
+        ]);
+        setSales(newSales);
+        setHasMore(newHasMore);
+        setBooks(booksData);
+        setCustomers(customersData);
+    } catch (error) {
+        console.error("Failed to load initial sales data:", error);
+        toast({
+            variant: "destructive",
+            title: "Error",
+            description: "Could not load data. Please try again later.",
+        });
+    } finally {
+        setIsInitialLoading(false);
+    }
+}, [toast]);
+
+  React.useEffect(() => {
+    loadInitialData();
+  }, [loadInitialData]);
+
 
   const getBookTitle = (bookId: string) => books.find(b => b.id === bookId)?.title || 'Unknown Book';
   const getCustomerName = (customerId: string) => customers.find(c => c.id === customerId)?.name || 'Unknown Customer';
 
   const handleLoadMore = async () => {
-    if (!hasMoreSales || isLoadingMore) return;
+    if (!hasMore || isLoadingMore) return;
     setIsLoadingMore(true);
     const lastSaleId = sales[sales.length - 1]?.id;
-    const { sales: newSales, hasMore } = await getSalesPaginated({ pageLimit: 10, lastVisibleId: lastSaleId });
-    setSales(prev => [...prev, ...newSales]);
-    setHasMoreSales(hasMore);
-    setIsLoadingMore(false);
+    try {
+        const { sales: newSales, hasMore: newHasMore } = await getSalesPaginated({ pageLimit: 5, lastVisibleId: lastSaleId });
+        setSales(prev => [...prev, ...newSales]);
+        setHasMore(newHasMore);
+    } catch(e) {
+        toast({
+            variant: "destructive",
+            title: "Error",
+            description: "Could not load more sales.",
+        });
+    } finally {
+        setIsLoadingMore(false);
+    }
   };
 
 
@@ -182,7 +215,7 @@ export default function SalesManagement({ initialSales, initialHasMore, initialB
     });
   };
 
-  const getFilteredSales = async () => {
+  const getFilteredSales = () => {
     if (!dateRange?.from) {
         toast({
             variant: "destructive",
@@ -191,20 +224,18 @@ export default function SalesManagement({ initialSales, initialHasMore, initialB
         return null;
     }
     
-    // For reports, we need all sales, not just recent ones
-    const allSales = await getSales();
     const from = dateRange.from;
     const to = dateRange.to || dateRange.from;
     to.setHours(23, 59, 59, 999);
 
-    return allSales.filter(sale => {
+    return sales.filter(sale => {
       const saleDate = new Date(sale.date);
       return saleDate >= from && saleDate <= to;
     });
   }
   
-  const handleDownloadPdf = async () => {
-    const filteredSales = await getFilteredSales();
+  const handleDownloadPdf = () => {
+    const filteredSales = getFilteredSales();
     if (!filteredSales) return;
 
     if (filteredSales.length === 0) {
@@ -231,8 +262,8 @@ export default function SalesManagement({ initialSales, initialHasMore, initialB
     doc.save(`sales-report-${format(dateRange!.from!, 'yyyy-MM-dd')}-to-${format(dateRange!.to! || dateRange!.from!, 'yyyy-MM-dd')}.pdf`);
   };
 
-  const handleDownloadCsv = async () => {
-    const filteredSales = await getFilteredSales();
+  const handleDownloadCsv = () => {
+    const filteredSales = getFilteredSales();
     if (!filteredSales) return;
 
     if (filteredSales.length === 0) {
@@ -336,7 +367,18 @@ export default function SalesManagement({ initialSales, initialHasMore, initialB
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {sales.length > 0 ? sales.map((sale) => {
+                {isInitialLoading ? (
+                    Array.from({ length: 5 }).map((_, i) => (
+                        <TableRow key={`skeleton-${i}`}>
+                            <TableCell><Skeleton className="h-5 w-2/4" /></TableCell>
+                            <TableCell><Skeleton className="h-5 w-3/4" /></TableCell>
+                            <TableCell><Skeleton className="h-5 w-full" /></TableCell>
+                            <TableCell><Skeleton className="h-5 w-1/4" /></TableCell>
+                            <TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell>
+                            <TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell>
+                        </TableRow>
+                    ))
+                ) : sales.length > 0 ? sales.map((sale) => {
                   const customer = customers.find(c => c.id === sale.customerId);
                   return (
                     <TableRow key={sale.id}>
@@ -375,7 +417,7 @@ export default function SalesManagement({ initialSales, initialHasMore, initialB
               </TableBody>
             </Table>
           </div>
-          {hasMoreSales && (
+          {hasMore && (
             <div className="flex justify-center mt-4">
               <Button onClick={handleLoadMore} disabled={isLoadingMore}>
                 {isLoadingMore ? <><Loader2 className="mr-2 h-4 w-4 animate-spin"/> Loading...</> : 'Load More'}
@@ -410,13 +452,15 @@ export default function SalesManagement({ initialSales, initialHasMore, initialB
                                 <SelectValue placeholder="Select a customer" />
                               </SelectTrigger>
                             </FormControl>
-                            <SelectContent>
-                              {customers.map(customer => (
-                                <SelectItem key={customer.id} value={customer.id}>
-                                  {customer.name}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
+                            <SelectPortal>
+                              <SelectContent>
+                                {customers.map(customer => (
+                                  <SelectItem key={customer.id} value={customer.id}>
+                                    {customer.name}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </SelectPortal>
                           </Select>
                           <FormMessage />
                         </FormItem>
@@ -445,13 +489,15 @@ export default function SalesManagement({ initialSales, initialHasMore, initialB
                                         <SelectValue placeholder="Select a book" />
                                       </SelectTrigger>
                                     </FormControl>
-                                    <SelectContent>
-                                      {books.map(book => (
-                                        <SelectItem key={book.id} value={book.id} disabled={watchItems.some((i, itemIndex) => i.bookId === book.id && itemIndex !== index)}>
-                                          {book.title}
-                                        </SelectItem>
-                                      ))}
-                                    </SelectContent>
+                                    <SelectPortal>
+                                      <SelectContent>
+                                        {books.map(book => (
+                                          <SelectItem key={book.id} value={book.id} disabled={watchItems.some((i, itemIndex) => i.bookId === book.id && itemIndex !== index)}>
+                                            {book.title}
+                                          </SelectItem>
+                                        ))}
+                                      </SelectContent>
+                                    </SelectPortal>
                                   </Select>
                                   <FormMessage />
                                 </FormItem>
@@ -515,11 +561,13 @@ export default function SalesManagement({ initialSales, initialHasMore, initialB
                                         <SelectValue placeholder="Type" />
                                       </SelectTrigger>
                                     </FormControl>
-                                    <SelectContent>
-                                      <SelectItem value="none">None</SelectItem>
-                                      <SelectItem value="percentage">%</SelectItem>
-                                      <SelectItem value="amount">$</SelectItem>
-                                    </SelectContent>
+                                    <SelectPortal>
+                                      <SelectContent>
+                                        <SelectItem value="none">None</SelectItem>
+                                        <SelectItem value="percentage">%</SelectItem>
+                                        <SelectItem value="amount">$</SelectItem>
+                                      </SelectContent>
+                                    </SelectPortal>
                                   </Select>
                                 </FormItem>
                               )}

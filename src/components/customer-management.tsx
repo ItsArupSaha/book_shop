@@ -6,7 +6,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
 import { PlusCircle, Edit, Trash2, FileText, FileSpreadsheet, Loader2 } from 'lucide-react';
-import { getCustomers, getCustomersPaginated, addCustomer, updateCustomer, deleteCustomer } from '@/lib/actions';
+import { getCustomersPaginated, addCustomer, updateCustomer, deleteCustomer } from '@/lib/actions';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import Papa from 'papaparse';
@@ -42,6 +42,7 @@ import {
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
 import { Textarea } from './ui/textarea';
+import { Skeleton } from './ui/skeleton';
 
 const customerSchema = z.object({
   name: z.string().min(1, 'Name is required'),
@@ -53,14 +54,10 @@ const customerSchema = z.object({
 
 type CustomerFormValues = z.infer<typeof customerSchema>;
 
-interface CustomerManagementProps {
-  initialCustomers: Customer[];
-  initialHasMore: boolean;
-}
-
-export default function CustomerManagement({ initialCustomers, initialHasMore }: CustomerManagementProps) {
-  const [customers, setCustomers] = React.useState<Customer[]>(initialCustomers);
-  const [hasMore, setHasMore] = React.useState(initialHasMore);
+export default function CustomerManagement() {
+  const [customers, setCustomers] = React.useState<Customer[]>([]);
+  const [hasMore, setHasMore] = React.useState(true);
+  const [isInitialLoading, setIsInitialLoading] = React.useState(true);
   const [isLoadingMore, setIsLoadingMore] = React.useState(false);
   const [isDialogOpen, setIsDialogOpen] = React.useState(false);
   const [editingCustomer, setEditingCustomer] = React.useState<Customer | null>(null);
@@ -68,19 +65,45 @@ export default function CustomerManagement({ initialCustomers, initialHasMore }:
   const [isPending, startTransition] = React.useTransition();
 
   const loadInitialCustomers = React.useCallback(async () => {
-      const { customers: refreshedCustomers, hasMore: refreshedHasMore } = await getCustomersPaginated({ pageLimit: 15 });
-      setCustomers(refreshedCustomers);
-      setHasMore(refreshedHasMore);
-  }, []);
+      setIsInitialLoading(true);
+      try {
+        const { customers: refreshedCustomers, hasMore: refreshedHasMore } = await getCustomersPaginated({ pageLimit: 5 });
+        setCustomers(refreshedCustomers);
+        setHasMore(refreshedHasMore);
+      } catch (error) {
+        console.error("Failed to load customers:", error);
+        toast({
+            variant: "destructive",
+            title: "Error",
+            description: "Could not load customer data. Please try again later.",
+        });
+      } finally {
+        setIsInitialLoading(false);
+      }
+  }, [toast]);
+
+  React.useEffect(() => {
+    loadInitialCustomers();
+  }, [loadInitialCustomers]);
 
   const handleLoadMore = async () => {
     if (!hasMore || isLoadingMore) return;
     setIsLoadingMore(true);
     const lastCustomerId = customers[customers.length - 1]?.id;
-    const { customers: newCustomers, hasMore: newHasMore } = await getCustomersPaginated({ pageLimit: 15, lastVisibleId: lastCustomerId });
-    setCustomers(prev => [...prev, ...newCustomers]);
-    setHasMore(newHasMore);
-    setIsLoadingMore(false);
+    try {
+        const { customers: newCustomers, hasMore: newHasMore } = await getCustomersPaginated({ pageLimit: 5, lastVisibleId: lastCustomerId });
+        setCustomers(prev => [...prev, ...newCustomers]);
+        setHasMore(newHasMore);
+    } catch (error) {
+        console.error("Failed to load more customers:", error);
+        toast({
+            variant: "destructive",
+            title: "Error",
+            description: "Could not load more customers.",
+        });
+    } finally {
+        setIsLoadingMore(false);
+    }
   };
 
   const form = useForm<CustomerFormValues>({
@@ -108,53 +131,59 @@ export default function CustomerManagement({ initialCustomers, initialHasMore }:
   
   const handleDelete = (id: string) => {
     startTransition(async () => {
-        await deleteCustomer(id);
-        await loadInitialCustomers();
-        toast({ title: "Customer Deleted", description: "The customer has been removed." });
+        try {
+            await deleteCustomer(id);
+            await loadInitialCustomers();
+            toast({ title: "Customer Deleted", description: "The customer has been removed." });
+        } catch(e) {
+             toast({ variant: "destructive", title: "Error", description: "Could not delete customer." });
+        }
     });
   }
 
   const onSubmit = (data: CustomerFormValues) => {
     startTransition(async () => {
-        if (editingCustomer) {
-            await updateCustomer(editingCustomer.id, data);
-            toast({ title: "Customer Updated", description: "The customer details have been saved." });
-        } else {
-            await addCustomer(data);
-            toast({ title: "Customer Added", description: "The new customer has been added." });
+        try {
+            if (editingCustomer) {
+                await updateCustomer(editingCustomer.id, data);
+                toast({ title: "Customer Updated", description: "The customer details have been saved." });
+            } else {
+                await addCustomer(data);
+                toast({ title: "Customer Added", description: "The new customer has been added." });
+            }
+            await loadInitialCustomers();
+            setIsDialogOpen(false);
+            setEditingCustomer(null);
+        } catch(e) {
+            toast({ variant: "destructive", title: "Error", description: "Could not save customer." });
         }
-        await loadInitialCustomers();
-        setIsDialogOpen(false);
-        setEditingCustomer(null);
     });
   };
 
-  const handleDownloadPdf = async () => {
-    const allCustomers = await getCustomers();
-    if (!allCustomers.length) return;
+  const handleDownloadPdf = () => {
+    if (!customers.length) return;
     
     const doc = new jsPDF();
-    doc.text(`Customer List`, 14, 15);
+    doc.text(`Customer List (Visible)`, 14, 15);
     
     autoTable(doc, {
       startY: 20,
-      head: [['Name', 'Phone', 'Address']],
-      body: allCustomers.map(c => [c.name, c.phone, c.address]),
+      head: [['Name', 'Phone', 'Address', 'Due Balance']],
+      body: customers.map(c => [c.name, c.phone, c.address, `$${(c.dueBalance || 0).toFixed(2)}`]),
     });
     
     doc.save(`customer-list.pdf`);
   };
 
-  const handleDownloadCsv = async () => {
-    const allCustomers = await getCustomers();
-    if (!allCustomers.length) return;
+  const handleDownloadCsv = () => {
+    if (!customers.length) return;
     
-    const csvData = allCustomers.map(c => ({
+    const csvData = customers.map(c => ({
       Name: c.name,
       Phone: c.phone,
       WhatsApp: c.whatsapp || '',
       Address: c.address,
-      'Opening Balance': c.openingBalance,
+      'Due Balance': c.dueBalance || 0,
     }));
 
     const csv = Papa.unparse(csvData);
@@ -208,26 +237,38 @@ export default function CustomerManagement({ initialCustomers, initialHasMore }:
               </TableRow>
             </TableHeader>
             <TableBody>
-              {customers.map((customer) => (
-                <TableRow key={customer.id}>
-                  <TableCell className="font-medium">
-                    <Link href={`/customers/${customer.id}`} className="hover:underline text-primary">
-                      {customer.name}
-                    </Link>
-                  </TableCell>
-                  <TableCell>{customer.phone}</TableCell>
-                  <TableCell>{customer.address}</TableCell>
-                  <TableCell className="text-right">${customer.openingBalance.toFixed(2)}</TableCell>
-                  <TableCell className="text-right">
-                    <Button variant="ghost" size="icon" onClick={() => handleEdit(customer)}>
-                      <Edit className="h-4 w-4" />
-                    </Button>
-                     <Button variant="ghost" size="icon" onClick={() => handleDelete(customer.id)} disabled={isPending}>
-                      <Trash2 className="h-4 w-4 text-destructive" />
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
+              {isInitialLoading ? (
+                Array.from({ length: 5 }).map((_, i) => (
+                  <TableRow key={`skeleton-${i}`}>
+                    <TableCell><Skeleton className="h-5 w-3/4" /></TableCell>
+                    <TableCell><Skeleton className="h-5 w-2/4" /></TableCell>
+                    <TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell>
+                    <TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell>
+                    <TableCell><Skeleton className="h-5 w-3/4 ml-auto" /></TableCell>
+                  </TableRow>
+                ))
+              ) : (
+                customers.map((customer) => (
+                  <TableRow key={customer.id}>
+                    <TableCell className="font-medium">
+                      <Link href={`/customers/${customer.id}`} className="hover:underline text-primary">
+                        {customer.name}
+                      </Link>
+                    </TableCell>
+                    <TableCell>{customer.phone}</TableCell>
+                    <TableCell>{customer.address}</TableCell>
+                    <TableCell className="text-right">${(customer.dueBalance || 0).toFixed(2)}</TableCell>
+                    <TableCell className="text-right">
+                      <Button variant="ghost" size="icon" onClick={() => handleEdit(customer)}>
+                        <Edit className="h-4 w-4" />
+                      </Button>
+                       <Button variant="ghost" size="icon" onClick={() => handleDelete(customer.id)} disabled={isPending}>
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
             </TableBody>
           </Table>
         </div>

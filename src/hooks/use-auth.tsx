@@ -1,10 +1,10 @@
 
 'use client';
 
-import * as React from 'react';
-import { onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut as firebaseSignOut, type User } from 'firebase/auth';
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
+import { signOut as firebaseSignOut, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, type User } from 'firebase/auth';
+import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import * as React from 'react';
 
 interface AuthContextType {
   user: User | null;
@@ -22,10 +22,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isApproved, setIsApproved] = React.useState(false);
 
   React.useEffect(() => {
+    if (!auth || !db) {
+      console.warn('Firebase not configured. Auth functionality will be disabled.');
+      setLoading(false);
+      return;
+    }
+
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
         setUser(user);
-        const userRef = doc(db, 'users', user.uid);
+        const userRef = doc(db!, 'users', user.uid);
         const docSnap = await getDoc(userRef);
 
         if (docSnap.exists()) {
@@ -53,6 +59,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signInWithGoogle = async () => {
+    if (!auth) {
+      throw new Error('Firebase not configured');
+    }
     const provider = new GoogleAuthProvider();
     try {
       await signInWithPopup(auth, provider);
@@ -63,6 +72,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const signOut = async () => {
+    if (!auth) {
+      throw new Error('Firebase not configured');
+    }
     try {
       await firebaseSignOut(auth);
     } catch (error) {

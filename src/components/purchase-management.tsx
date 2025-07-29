@@ -1,34 +1,35 @@
 
 'use client';
 
-import * as React from 'react';
-import { useForm, useFieldArray } from 'react-hook-form';
+import { addPurchase, getPurchasesPaginated } from '@/lib/actions';
 import { zodResolver } from '@hookform/resolvers/zod';
-import * as z from 'zod';
-import { PlusCircle, Trash2, Download, FileText, FileSpreadsheet, Loader2 } from 'lucide-react';
 import { format } from 'date-fns';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { Download, FileSpreadsheet, FileText, Loader2, PlusCircle, Trash2 } from 'lucide-react';
 import Papa from 'papaparse';
-import { getPurchasesPaginated, addPurchase, getPurchases } from '@/lib/actions';
+import * as React from 'react';
 import type { DateRange } from 'react-day-picker';
+import { useFieldArray, useForm } from 'react-hook-form';
+import * as z from 'zod';
 
-import type { Purchase } from '@/lib/types';
 import { Button } from '@/components/ui/button';
+import { Calendar } from "@/components/ui/calendar";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { useToast } from '@/hooks/use-toast';
 import { Separator } from '@/components/ui/separator';
-import { Calendar } from "@/components/ui/calendar"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { Calendar as CalendarIcon } from "lucide-react"
-import { cn } from "@/lib/utils"
-import { ScrollArea } from './ui/scroll-area';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { useToast } from '@/hooks/use-toast';
+import type { Purchase } from '@/lib/types';
+import { cn } from "@/lib/utils";
+import { Calendar as CalendarIcon } from "lucide-react";
 import { RadioGroup, RadioGroupItem } from './ui/radio-group';
+import { ScrollArea } from './ui/scroll-area';
+import { Skeleton } from './ui/skeleton';
 
 const purchaseItemSchema = z.object({
   itemName: z.string().min(1, 'Item name is required'),
@@ -65,14 +66,10 @@ const purchaseFormSchema = z.object({
 
 type PurchaseFormValues = z.infer<typeof purchaseFormSchema>;
 
-interface PurchaseManagementProps {
-  initialPurchases: Purchase[];
-  initialHasMore: boolean;
-}
-
-export default function PurchaseManagement({ initialPurchases, initialHasMore }: PurchaseManagementProps) {
-  const [purchases, setPurchases] = React.useState<Purchase[]>(initialPurchases);
-  const [hasMore, setHasMore] = React.useState(initialHasMore);
+export default function PurchaseManagement() {
+  const [purchases, setPurchases] = React.useState<Purchase[]>([]);
+  const [hasMore, setHasMore] = React.useState(true);
+  const [isInitialLoading, setIsInitialLoading] = React.useState(true);
   const [isDialogOpen, setIsDialogOpen] = React.useState(false);
   const [isDownloadDialogOpen, setIsDownloadDialogOpen] = React.useState(false);
   const [dateRange, setDateRange] = React.useState<DateRange | undefined>();
@@ -81,19 +78,35 @@ export default function PurchaseManagement({ initialPurchases, initialHasMore }:
   const [isLoadingMore, setIsLoadingMore] = React.useState(false);
 
   const loadInitialData = React.useCallback(async () => {
-    const { purchases: newPurchases, hasMore: newHasMore } = await getPurchasesPaginated({ pageLimit: 10 });
-    setPurchases(newPurchases);
-    setHasMore(newHasMore);
-  }, []);
+    setIsInitialLoading(true);
+    try {
+      const { purchases: newPurchases, hasMore: newHasMore } = await getPurchasesPaginated({ pageLimit: 10 });
+      setPurchases(newPurchases);
+      setHasMore(newHasMore);
+    } catch (error) {
+       toast({ variant: "destructive", title: "Error", description: "Failed to load purchases." });
+    } finally {
+      setIsInitialLoading(false);
+    }
+  }, [toast]);
+
+  React.useEffect(() => {
+    loadInitialData();
+  }, [loadInitialData]);
 
   const handleLoadMore = async () => {
     if (!hasMore || isLoadingMore) return;
     setIsLoadingMore(true);
     const lastPurchaseId = purchases[purchases.length - 1]?.id;
-    const { purchases: newPurchases, hasMore: newHasMore } = await getPurchasesPaginated({ pageLimit: 10, lastVisibleId: lastPurchaseId });
-    setPurchases(prev => [...prev, ...newPurchases]);
-    setHasMore(newHasMore);
-    setIsLoadingMore(false);
+    try {
+      const { purchases: newPurchases, hasMore: newHasMore } = await getPurchasesPaginated({ pageLimit: 10, lastVisibleId: lastPurchaseId });
+      setPurchases(prev => [...prev, ...newPurchases]);
+      setHasMore(newHasMore);
+    } catch (error) {
+       toast({ variant: "destructive", title: "Error", description: "Failed to load more purchases." });
+    } finally {
+      setIsLoadingMore(false);
+    }
   };
 
   const form = useForm<PurchaseFormValues>({
@@ -144,35 +157,38 @@ export default function PurchaseManagement({ initialPurchases, initialHasMore }:
 
   const onSubmit = (data: PurchaseFormValues) => {
     startTransition(async () => {
-      const result = await addPurchase(data);
+      const purchaseData = {
+        ...data,
+        dueDate: data.dueDate.toISOString()
+      };
+      const result = await addPurchase(purchaseData);
       if (result?.success) {
         toast({ title: 'Purchase Recorded', description: 'The new purchase has been added and stock updated.' });
         loadInitialData();
         setIsDialogOpen(false);
       } else {
-        toast({ variant: 'destructive', title: 'Error', description: result.error || 'Failed to record purchase.' });
+        toast({ variant: 'destructive', title: 'Error', description: 'Failed to record purchase.' });
       }
     });
   };
 
-  const getFilteredPurchases = async () => {
+  const getFilteredPurchases = () => {
     if (!dateRange?.from) {
         toast({ variant: "destructive", title: "Please select a start date." });
         return null;
     }
-    // For reports, we need all purchases, not just recent ones
-    const allPurchases = await getPurchases();
+    
     const from = dateRange.from;
     const to = dateRange.to || dateRange.from;
     to.setHours(23, 59, 59, 999);
-    return allPurchases.filter(p => {
+    return purchases.filter(p => {
       const pDate = new Date(p.date);
       return pDate >= from && pDate <= to;
     });
   }
 
-  const handleDownloadPdf = async () => {
-    const filteredPurchases = await getFilteredPurchases();
+  const handleDownloadPdf = () => {
+    const filteredPurchases = getFilteredPurchases();
     if (!filteredPurchases) return;
     if (filteredPurchases.length === 0) {
       toast({ title: 'No Purchases Found', description: 'There are no purchases in the selected date range.' });
@@ -195,8 +211,8 @@ export default function PurchaseManagement({ initialPurchases, initialHasMore }:
     doc.save(`purchases-report-${format(dateRange!.from!, 'yyyy-MM-dd')}.pdf`);
   };
 
-  const handleDownloadCsv = async () => {
-    const filteredPurchases = await getFilteredPurchases();
+  const handleDownloadCsv = () => {
+    const filteredPurchases = getFilteredPurchases();
     if (!filteredPurchases) return;
     if (filteredPurchases.length === 0) {
       toast({ title: 'No Purchases Found', description: 'There are no purchases in the selected date range.' });
@@ -284,7 +300,18 @@ export default function PurchaseManagement({ initialPurchases, initialHasMore }:
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {purchases.length > 0 ? purchases.map((purchase) => (
+                {isInitialLoading ? (
+                  Array.from({ length: 5 }).map((_, i) => (
+                    <TableRow key={`skeleton-${i}`}>
+                      <TableCell><Skeleton className="h-5 w-2/4" /></TableCell>
+                      <TableCell><Skeleton className="h-5 w-3/4" /></TableCell>
+                      <TableCell><Skeleton className="h-5 w-2/4" /></TableCell>
+                      <TableCell><Skeleton className="h-5 w-full" /></TableCell>
+                      <TableCell><Skeleton className="h-5 w-1/4" /></TableCell>
+                      <TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell>
+                    </TableRow>
+                  ))
+                ) : purchases.length > 0 ? purchases.map((purchase) => (
                   <TableRow key={purchase.id}>
                     <TableCell>{format(new Date(purchase.date), 'PPP')}</TableCell>
                     <TableCell className="font-mono">{purchase.purchaseId}</TableCell>

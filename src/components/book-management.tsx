@@ -6,15 +6,14 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
 import { PlusCircle, Edit, Trash2, Download, FileText, FileSpreadsheet, Loader2 } from 'lucide-react';
-import { getBooks, getBooksPaginated, addBook, updateBook, deleteBook, getSales } from '@/lib/actions';
+import { getBooksPaginated, addBook, updateBook, deleteBook, calculateClosingStock } from '@/lib/actions';
 import { format } from 'date-fns';
-import { cn } from '@/lib/utils';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import Papa from 'papaparse';
 
 
-import type { Book, Sale } from '@/lib/types';
+import type { Book, ClosingStock } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import {
   Table,
@@ -45,6 +44,7 @@ import {
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
 import { Calendar } from '@/components/ui/calendar';
+import { Skeleton } from './ui/skeleton';
 
 const bookSchema = z.object({
   title: z.string().min(1, 'Title is required'),
@@ -59,18 +59,11 @@ const bookSchema = z.object({
 
 type BookFormValues = z.infer<typeof bookSchema>;
 
-interface ClosingStock extends Book {
-  closingStock: number;
-}
 
-interface BookManagementProps {
-  initialBooks: Book[];
-  initialHasMore: boolean;
-}
-
-export default function BookManagement({ initialBooks, initialHasMore }: BookManagementProps) {
-  const [books, setBooks] = React.useState<Book[]>(initialBooks);
-  const [hasMore, setHasMore] = React.useState(initialHasMore);
+export default function BookManagement() {
+  const [books, setBooks] = React.useState<Book[]>([]);
+  const [hasMore, setHasMore] = React.useState(true);
+  const [isInitialLoading, setIsInitialLoading] = React.useState(true);
   const [isLoadingMore, setIsLoadingMore] = React.useState(false);
   const [isDialogOpen, setIsDialogOpen] = React.useState(false);
   const [isStockDialogOpen, setIsStockDialogOpen] = React.useState(false);
@@ -82,19 +75,46 @@ export default function BookManagement({ initialBooks, initialHasMore }: BookMan
   const [isPending, startTransition] = React.useTransition();
 
   const loadInitialData = React.useCallback(async () => {
-    const { books: newBooks, hasMore: newHasMore } = await getBooksPaginated({ pageLimit: 15 });
-    setBooks(newBooks);
-    setHasMore(newHasMore);
-  }, []);
+    setIsInitialLoading(true);
+    try {
+        const { books: newBooks, hasMore: newHasMore } = await getBooksPaginated({ pageLimit: 5 });
+        setBooks(newBooks);
+        setHasMore(newHasMore);
+    } catch (error) {
+        console.error("Failed to load books:", error);
+        toast({
+            variant: "destructive",
+            title: "Error",
+            description: "Could not load book data. Please try again later.",
+        });
+    } finally {
+        setIsInitialLoading(false);
+    }
+}, [toast]);
+
+  React.useEffect(() => {
+    loadInitialData();
+  }, [loadInitialData]);
+
 
   const handleLoadMore = async () => {
     if (!hasMore || isLoadingMore) return;
     setIsLoadingMore(true);
     const lastBookId = books[books.length - 1]?.id;
-    const { books: newBooks, hasMore: newHasMore } = await getBooksPaginated({ pageLimit: 15, lastVisibleId: lastBookId });
-    setBooks(prev => [...prev, ...newBooks]);
-    setHasMore(newHasMore);
-    setIsLoadingMore(false);
+    try {
+        const { books: newBooks, hasMore: newHasMore } = await getBooksPaginated({ pageLimit: 5, lastVisibleId: lastBookId });
+        setBooks(prev => [...prev, ...newBooks]);
+        setHasMore(newHasMore);
+    } catch (error) {
+        console.error("Failed to load more books:", error);
+        toast({
+            variant: "destructive",
+            title: "Error",
+            description: "Could not load more books.",
+        });
+    } finally {
+        setIsLoadingMore(false);
+    }
   };
 
   const form = useForm<BookFormValues>({
@@ -122,24 +142,32 @@ export default function BookManagement({ initialBooks, initialHasMore }: BookMan
   
   const handleDelete = (id: string) => {
     startTransition(async () => {
-      await deleteBook(id);
-      await loadInitialData();
-      toast({ title: "Book Deleted", description: "The book has been removed from the inventory." });
+      try {
+        await deleteBook(id);
+        await loadInitialData(); // Reload data to reflect deletion
+        toast({ title: "Book Deleted", description: "The book has been removed from the inventory." });
+      } catch (error) {
+         toast({ variant: "destructive", title: "Error", description: "Could not delete the book." });
+      }
     });
   }
 
   const onSubmit = (data: BookFormValues) => {
     startTransition(async () => {
-      if (editingBook) {
-        await updateBook(editingBook.id, data);
-        toast({ title: "Book Updated", description: "The book details have been saved." });
-      } else {
-        await addBook(data);
-        toast({ title: "Book Added", description: "The new book is now in your inventory." });
+      try {
+        if (editingBook) {
+          await updateBook(editingBook.id, data);
+          toast({ title: "Book Updated", description: "The book details have been saved." });
+        } else {
+          await addBook(data);
+          toast({ title: "Book Added", description: "The new book is now in your inventory." });
+        }
+        await loadInitialData(); // Reload to show the changes
+        setIsDialogOpen(false);
+        setEditingBook(null);
+      } catch (error) {
+        toast({ variant: "destructive", title: "Error", description: "Failed to save the book." });
       }
-      await loadInitialData();
-      setIsDialogOpen(false);
-      setEditingBook(null);
     });
   };
   
@@ -150,29 +178,18 @@ export default function BookManagement({ initialBooks, initialHasMore }: BookMan
     }
     
     setIsCalculating(true);
-    // Fetch all books and sales for this calculation, ignoring component state
-    const [allBooks, allSales] = await Promise.all([getBooks(), getSales()]);
-    
-    const salesAfterDate = allSales.filter(s => new Date(s.date) > closingStockDate);
-
-    const calculatedData = allBooks.map(book => {
-      const quantitySoldAfter = salesAfterDate.reduce((total, sale) => {
-        const item = sale.items.find(i => i.bookId === book.id);
-        return total + (item ? item.quantity : 0);
-      }, 0);
-      
-      return {
-        ...book,
-        closingStock: book.stock + quantitySoldAfter
-      }
-    });
-
-    setClosingStockData(calculatedData);
-    setIsCalculating(false);
-    setIsStockDialogOpen(false);
+    try {
+        const calculatedData = await calculateClosingStock(closingStockDate);
+        setClosingStockData(calculatedData);
+    } catch (error) {
+        toast({ variant: "destructive", title: "Error", description: "Could not calculate closing stock." });
+    } finally {
+        setIsCalculating(false);
+        setIsStockDialogOpen(false);
+    }
   }
 
-  const handleDownloadPdf = () => {
+  const handleDownloadClosingStockPdf = () => {
     if (!closingStockData.length || !closingStockDate) return;
     
     const doc = new jsPDF();
@@ -189,7 +206,7 @@ export default function BookManagement({ initialBooks, initialHasMore }: BookMan
     doc.save(`closing-stock-report-${format(closingStockDate, 'yyyy-MM-dd')}.pdf`);
   };
 
-  const handleDownloadCsv = () => {
+  const handleDownloadClosingStockCsv = () => {
     if (!closingStockData.length || !closingStockDate) return;
     
     const csvData = closingStockData.map(book => ({
@@ -289,10 +306,10 @@ export default function BookManagement({ initialBooks, initialHasMore }: BookMan
               </Table>
             </div>
              <div className="flex items-center gap-2 mt-4">
-              <Button variant="outline" size="sm" onClick={handleDownloadPdf}>
+              <Button variant="outline" size="sm" onClick={handleDownloadClosingStockPdf}>
                 <FileText className="mr-2 h-4 w-4" /> Download PDF
               </Button>
-              <Button variant="outline" size="sm" onClick={handleDownloadCsv}>
+              <Button variant="outline" size="sm" onClick={handleDownloadClosingStockCsv}>
                 <FileSpreadsheet className="mr-2 h-4 w-4" /> Download CSV
               </Button>
               <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setClosingStockData([])}>Clear Results</Button>
@@ -314,22 +331,34 @@ export default function BookManagement({ initialBooks, initialHasMore }: BookMan
               </TableRow>
             </TableHeader>
             <TableBody>
-              {books.map((book) => (
-                <TableRow key={book.id}>
-                  <TableCell className="font-medium">{book.title}</TableCell>
-                  <TableCell>{book.author}</TableCell>
-                  <TableCell className="text-right">${book.sellingPrice.toFixed(2)}</TableCell>
-                  <TableCell className="text-right">{book.stock}</TableCell>
-                  <TableCell className="text-right">
-                    <Button variant="ghost" size="icon" onClick={() => handleEdit(book)}>
-                      <Edit className="h-4 w-4" />
-                    </Button>
-                     <Button variant="ghost" size="icon" onClick={() => handleDelete(book.id)} disabled={isPending}>
-                      <Trash2 className="h-4 w-4 text-destructive" />
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
+              {isInitialLoading ? (
+                Array.from({ length: 5 }).map((_, i) => (
+                  <TableRow key={`skeleton-${i}`}>
+                    <TableCell><Skeleton className="h-5 w-3/4" /></TableCell>
+                    <TableCell><Skeleton className="h-5 w-2/4" /></TableCell>
+                    <TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell>
+                    <TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell>
+                    <TableCell><Skeleton className="h-5 w-3/4 ml-auto" /></TableCell>
+                  </TableRow>
+                ))
+              ) : (
+                books.map((book) => (
+                  <TableRow key={book.id}>
+                    <TableCell className="font-medium">{book.title}</TableCell>
+                    <TableCell>{book.author}</TableCell>
+                    <TableCell className="text-right">${book.sellingPrice.toFixed(2)}</TableCell>
+                    <TableCell className="text-right">{book.stock}</TableCell>
+                    <TableCell className="text-right">
+                      <Button variant="ghost" size="icon" onClick={() => handleEdit(book)}>
+                        <Edit className="h-4 w-4" />
+                      </Button>
+                       <Button variant="ghost" size="icon" onClick={() => handleDelete(book.id)} disabled={isPending}>
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
             </TableBody>
           </Table>
         </div>
