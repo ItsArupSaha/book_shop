@@ -26,6 +26,8 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Calendar as CalendarIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Skeleton } from './ui/skeleton';
+import { useAuth } from '@/hooks/use-auth';
+import { ScrollArea } from './ui/scroll-area';
 
 const transactionSchema = z.object({
   description: z.string().min(1, 'Description is required'),
@@ -39,9 +41,11 @@ interface TransactionsManagementProps {
   title: string;
   description: string;
   type: 'Payable';
+  userId: string;
 }
 
-export default function TransactionsManagement({ title, description, type }: TransactionsManagementProps) {
+export default function TransactionsManagement({ title, description, type, userId }: TransactionsManagementProps) {
+  const { authUser } = useAuth();
   const [transactions, setTransactions] = React.useState<Transaction[]>([]);
   const [hasMore, setHasMore] = React.useState(true);
   const [isInitialLoading, setIsInitialLoading] = React.useState(true);
@@ -54,21 +58,23 @@ export default function TransactionsManagement({ title, description, type }: Tra
 
   const loadInitialData = React.useCallback(async () => {
     setIsInitialLoading(true);
-    const { transactions: newTransactions, hasMore: newHasMore } = await getTransactionsPaginated({ type, pageLimit: 5 });
+    const { transactions: newTransactions, hasMore: newHasMore } = await getTransactionsPaginated({ userId, type, pageLimit: 5 });
     setTransactions(newTransactions);
     setHasMore(newHasMore);
     setIsInitialLoading(false);
-  }, [type]);
+  }, [userId, type]);
 
   React.useEffect(() => {
-    loadInitialData();
-  }, [loadInitialData]);
+    if (userId) {
+        loadInitialData();
+    }
+  }, [userId, loadInitialData]);
 
   const handleLoadMore = async () => {
     if (!hasMore || isLoadingMore) return;
     setIsLoadingMore(true);
     const lastTransactionId = transactions[transactions.length - 1]?.id;
-    const { transactions: newTransactions, hasMore: newHasMore } = await getTransactionsPaginated({ type, pageLimit: 5, lastVisibleId: lastTransactionId });
+    const { transactions: newTransactions, hasMore: newHasMore } = await getTransactionsPaginated({ userId, type, pageLimit: 5, lastVisibleId: lastTransactionId });
     setTransactions(prev => [...prev, ...newTransactions]);
     setHasMore(newHasMore);
     setIsLoadingMore(false);
@@ -89,7 +95,7 @@ export default function TransactionsManagement({ title, description, type }: Tra
 
   const onSubmit = (data: TransactionFormValues) => {
     startTransition(async () => {
-        const newTransaction = await addTransaction({ ...data, type });
+        const newTransaction = await addTransaction(userId, { ...data, type });
         setTransactions(prev => [newTransaction, ...prev]);
         toast({ title: `${type} Added`, description: `The new ${type.toLowerCase()} has been recorded.` });
         setIsDialogOpen(false);
@@ -101,7 +107,7 @@ export default function TransactionsManagement({ title, description, type }: Tra
         toast({ variant: "destructive", title: "Please select a start date." });
         return null;
     }
-    const allTrans = await getTransactions(type); // Fetch all for report
+    const allTrans = await getTransactions(userId, type); // Fetch all for report
     const from = dateRange.from;
     const to = dateRange.to || dateRange.from;
     to.setHours(23, 59, 59, 999);
@@ -113,16 +119,45 @@ export default function TransactionsManagement({ title, description, type }: Tra
 
   const handleDownloadPdf = async () => {
     const filteredTransactions = await getFilteredTransactions();
-    if (!filteredTransactions) return;
+    if (!filteredTransactions || !authUser) return;
     if (filteredTransactions.length === 0) {
       toast({ title: `No Pending ${type}s Found`, description: `There are no pending ${type.toLowerCase()}s in the selected date range.` });
       return;
     }
     const doc = new jsPDF();
     const dateString = `${format(dateRange!.from!, 'PPP')} - ${format(dateRange!.to! || dateRange!.from!, 'PPP')}`;
-    doc.text(`Pending ${type}s Report: ${dateString}`, 14, 15);
+    
+    // Left side header
+    doc.setFontSize(16);
+    doc.setFont('helvetica', 'bold');
+    doc.text(authUser.companyName || 'Bookstore', 14, 20);
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.text(authUser.address || '', 14, 26);
+    doc.text(authUser.phone || '', 14, 32);
+
+    // Right side header
+    let yPos = 20;
+    if (authUser.bkashNumber) {
+        doc.text(`Bkash: ${authUser.bkashNumber}`, 200, yPos, { align: 'right' });
+        yPos += 6;
+    }
+    if (authUser.bankInfo) {
+        doc.text(`Bank: ${authUser.bankInfo}`, 200, yPos, { align: 'right' });
+    }
+
+    // Report Title
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`Pending ${type}s Report`, 105, 45, { align: 'center' });
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(100);
+    doc.text(`For the period: ${dateString}`, 105, 51, { align: 'center' });
+    doc.setTextColor(0);
+
     autoTable(doc, {
-      startY: 20,
+      startY: 60,
       head: [['Description', 'Due Date', 'Amount']],
       body: filteredTransactions.map(t => [
         t.description,
@@ -179,16 +214,18 @@ export default function TransactionsManagement({ title, description, type }: Tra
                           <DialogTitle>Download {type} Report</DialogTitle>
                           <DialogDescription>Select a date range to download your pending {type.toLowerCase()} data.</DialogDescription>
                       </DialogHeader>
-                       <div className="py-4 flex flex-col items-center gap-4">
-                          <Calendar
-                              initialFocus
-                              mode="range"
-                              defaultMonth={dateRange?.from}
-                              selected={dateRange}
-                              onSelect={setDateRange}
-                              numberOfMonths={1}
-                          />
-                      </div>
+                      <ScrollArea className="max-h-[calc(100vh-20rem)] overflow-y-auto">
+                        <div className="py-4 flex flex-col items-center gap-4">
+                            <Calendar
+                                initialFocus
+                                mode="range"
+                                defaultMonth={dateRange?.from}
+                                selected={dateRange}
+                                onSelect={setDateRange}
+                                numberOfMonths={1}
+                            />
+                        </div>
+                      </ScrollArea>
                       <DialogFooter className="gap-2 sm:justify-center pt-4 border-t">
                           <Button variant="outline" onClick={handleDownloadPdf} disabled={!dateRange?.from}><FileText className="mr-2 h-4 w-4" /> PDF</Button>
                           <Button variant="outline" onClick={handleDownloadCsv} disabled={!dateRange?.from}><FileSpreadsheet className="mr-2 h-4 w-4" /> CSV</Button>

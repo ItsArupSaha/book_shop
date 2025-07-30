@@ -45,6 +45,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { useToast } from '@/hooks/use-toast';
 import { Calendar } from '@/components/ui/calendar';
 import { Skeleton } from './ui/skeleton';
+import { useAuth } from '@/hooks/use-auth';
 
 const bookSchema = z.object({
   title: z.string().min(1, 'Title is required'),
@@ -59,8 +60,12 @@ const bookSchema = z.object({
 
 type BookFormValues = z.infer<typeof bookSchema>;
 
+interface BookManagementProps {
+    userId: string;
+}
 
-export default function BookManagement() {
+export default function BookManagement({ userId }: BookManagementProps) {
+  const { authUser } = useAuth();
   const [books, setBooks] = React.useState<Book[]>([]);
   const [hasMore, setHasMore] = React.useState(true);
   const [isInitialLoading, setIsInitialLoading] = React.useState(true);
@@ -77,7 +82,7 @@ export default function BookManagement() {
   const loadInitialData = React.useCallback(async () => {
     setIsInitialLoading(true);
     try {
-        const { books: newBooks, hasMore: newHasMore } = await getBooksPaginated({ pageLimit: 5 });
+        const { books: newBooks, hasMore: newHasMore } = await getBooksPaginated({ userId, pageLimit: 5 });
         setBooks(newBooks);
         setHasMore(newHasMore);
     } catch (error) {
@@ -90,11 +95,13 @@ export default function BookManagement() {
     } finally {
         setIsInitialLoading(false);
     }
-}, [toast]);
+}, [userId, toast]);
 
   React.useEffect(() => {
-    loadInitialData();
-  }, [loadInitialData]);
+    if(userId) {
+        loadInitialData();
+    }
+  }, [userId, loadInitialData]);
 
 
   const handleLoadMore = async () => {
@@ -102,7 +109,7 @@ export default function BookManagement() {
     setIsLoadingMore(true);
     const lastBookId = books[books.length - 1]?.id;
     try {
-        const { books: newBooks, hasMore: newHasMore } = await getBooksPaginated({ pageLimit: 5, lastVisibleId: lastBookId });
+        const { books: newBooks, hasMore: newHasMore } = await getBooksPaginated({ userId, pageLimit: 5, lastVisibleId: lastBookId });
         setBooks(prev => [...prev, ...newBooks]);
         setHasMore(newHasMore);
     } catch (error) {
@@ -143,7 +150,7 @@ export default function BookManagement() {
   const handleDelete = (id: string) => {
     startTransition(async () => {
       try {
-        await deleteBook(id);
+        await deleteBook(userId, id);
         await loadInitialData(); // Reload data to reflect deletion
         toast({ title: "Book Deleted", description: "The book has been removed from the inventory." });
       } catch (error) {
@@ -156,10 +163,10 @@ export default function BookManagement() {
     startTransition(async () => {
       try {
         if (editingBook) {
-          await updateBook(editingBook.id, data);
+          await updateBook(userId, editingBook.id, data);
           toast({ title: "Book Updated", description: "The book details have been saved." });
         } else {
-          await addBook(data);
+          await addBook(userId, data);
           toast({ title: "Book Added", description: "The new book is now in your inventory." });
         }
         await loadInitialData(); // Reload to show the changes
@@ -179,7 +186,7 @@ export default function BookManagement() {
     
     setIsCalculating(true);
     try {
-        const calculatedData = await calculateClosingStock(closingStockDate);
+        const calculatedData = await calculateClosingStock(userId, closingStockDate);
         setClosingStockData(calculatedData);
     } catch (error) {
         toast({ variant: "destructive", title: "Error", description: "Could not calculate closing stock." });
@@ -190,15 +197,43 @@ export default function BookManagement() {
   }
 
   const handleDownloadClosingStockPdf = () => {
-    if (!closingStockData.length || !closingStockDate) return;
+    if (!closingStockData.length || !closingStockDate || !authUser) return;
     
     const doc = new jsPDF();
     const dateString = format(closingStockDate, 'PPP');
     
-    doc.text(`Closing Stock Report as of ${dateString}`, 14, 15);
-    
+    // Left side header
+    doc.setFontSize(16);
+    doc.setFont('helvetica', 'bold');
+    doc.text(authUser.companyName || 'Bookstore', 14, 20);
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.text(authUser.address || '', 14, 26);
+    doc.text(authUser.phone || '', 14, 32);
+
+    // Right side header
+    let yPos = 20;
+    if (authUser.bkashNumber) {
+        doc.text(`Bkash: ${authUser.bkashNumber}`, 200, yPos, { align: 'right' });
+        yPos += 6;
+    }
+    if (authUser.bankInfo) {
+        doc.text(`Bank: ${authUser.bankInfo}`, 200, yPos, { align: 'right' });
+    }
+
+    // Report Title
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Closing Stock Report', 105, 45, { align: 'center' });
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(100);
+    doc.text(`As of ${dateString}`, 105, 51, { align: 'center' });
+    doc.setTextColor(0);
+
+
     autoTable(doc, {
-      startY: 20,
+      startY: 60,
       head: [['Title', 'Author', 'Stock']],
       body: closingStockData.map(book => [book.title, book.author, book.closingStock]),
     });

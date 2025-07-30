@@ -9,18 +9,18 @@ import { getExpenses } from './expenses';
 import { getPurchases } from './purchases';
 import { getSales } from './sales';
 
-export async function getBalanceSheetData() {
+export async function getBalanceSheetData(userId: string) {
     if (!db) {
         throw new Error("Database not connected");
     }
 
     const [books, sales, expenses, allTransactionsData, purchases, donations] = await Promise.all([
-        getBooks(),
-        getSales(),
-        getExpenses(),
-        getDocs(collection(db, 'transactions')),
-        getPurchases(),
-        getDonations(),
+        getBooks(userId),
+        getSales(userId),
+        getExpenses(userId),
+        getDocs(collection(db, 'users', userId, 'transactions')),
+        getPurchases(userId),
+        getDonations(userId),
     ]);
 
     const allTransactions = allTransactionsData.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
@@ -28,22 +28,26 @@ export async function getBalanceSheetData() {
     let cash = 0;
     let bank = 0;
 
+    // Capital contributions are recorded as donations
+    donations.forEach(donation => {
+        if (donation.paymentMethod === 'Cash') {
+            cash += donation.amount;
+        } else if (donation.paymentMethod === 'Bank') {
+            bank += donation.amount;
+        }
+    });
+
     sales.forEach(sale => {
         if (sale.paymentMethod === 'Cash') {
             cash += sale.total;
         } else if (sale.paymentMethod === 'Bank') {
             bank += sale.total;
         } else if (sale.paymentMethod === 'Split' && sale.amountPaid) {
-            // Assuming split payments from sales are cash unless specified otherwise
-            cash += sale.amountPaid;
-        }
-    });
-    
-    donations.forEach(donation => {
-        if (donation.paymentMethod === 'Cash') {
-            cash += donation.amount;
-        } else if (donation.paymentMethod === 'Bank') {
-            bank += donation.amount;
+            if (sale.splitPaymentMethod === 'Bank') {
+                bank += sale.amountPaid;
+            } else {
+                cash += sale.amountPaid;
+            }
         }
     });
 

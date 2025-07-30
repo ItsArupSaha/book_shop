@@ -1,7 +1,7 @@
 
 'use client';
 
-import { addPurchase, getPurchasesPaginated } from '@/lib/actions';
+import { addPurchase, getPurchasesPaginated, getPurchases } from '@/lib/actions';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { format } from 'date-fns';
 import jsPDF from 'jspdf';
@@ -30,6 +30,7 @@ import { Calendar as CalendarIcon } from "lucide-react";
 import { RadioGroup, RadioGroupItem } from './ui/radio-group';
 import { ScrollArea } from './ui/scroll-area';
 import { Skeleton } from './ui/skeleton';
+import { useAuth } from '@/hooks/use-auth';
 
 const purchaseItemSchema = z.object({
   itemName: z.string().min(1, 'Item name is required'),
@@ -66,7 +67,12 @@ const purchaseFormSchema = z.object({
 
 type PurchaseFormValues = z.infer<typeof purchaseFormSchema>;
 
-export default function PurchaseManagement() {
+interface PurchaseManagementProps {
+    userId: string;
+}
+
+export default function PurchaseManagement({ userId }: PurchaseManagementProps) {
+  const { authUser } = useAuth();
   const [purchases, setPurchases] = React.useState<Purchase[]>([]);
   const [hasMore, setHasMore] = React.useState(true);
   const [isInitialLoading, setIsInitialLoading] = React.useState(true);
@@ -80,7 +86,7 @@ export default function PurchaseManagement() {
   const loadInitialData = React.useCallback(async () => {
     setIsInitialLoading(true);
     try {
-      const { purchases: newPurchases, hasMore: newHasMore } = await getPurchasesPaginated({ pageLimit: 10 });
+      const { purchases: newPurchases, hasMore: newHasMore } = await getPurchasesPaginated({ userId, pageLimit: 10 });
       setPurchases(newPurchases);
       setHasMore(newHasMore);
     } catch (error) {
@@ -88,18 +94,20 @@ export default function PurchaseManagement() {
     } finally {
       setIsInitialLoading(false);
     }
-  }, [toast]);
+  }, [userId, toast]);
 
   React.useEffect(() => {
-    loadInitialData();
-  }, [loadInitialData]);
+    if (userId) {
+        loadInitialData();
+    }
+  }, [userId, loadInitialData]);
 
   const handleLoadMore = async () => {
     if (!hasMore || isLoadingMore) return;
     setIsLoadingMore(true);
     const lastPurchaseId = purchases[purchases.length - 1]?.id;
     try {
-      const { purchases: newPurchases, hasMore: newHasMore } = await getPurchasesPaginated({ pageLimit: 10, lastVisibleId: lastPurchaseId });
+      const { purchases: newPurchases, hasMore: newHasMore } = await getPurchasesPaginated({ userId, pageLimit: 10, lastVisibleId: lastPurchaseId });
       setPurchases(prev => [...prev, ...newPurchases]);
       setHasMore(newHasMore);
     } catch (error) {
@@ -161,7 +169,7 @@ export default function PurchaseManagement() {
         ...data,
         dueDate: data.dueDate.toISOString()
       };
-      const result = await addPurchase(purchaseData);
+      const result = await addPurchase(userId, purchaseData);
       if (result?.success) {
         toast({ title: 'Purchase Recorded', description: 'The new purchase has been added and stock updated.' });
         loadInitialData();
@@ -172,33 +180,63 @@ export default function PurchaseManagement() {
     });
   };
 
-  const getFilteredPurchases = () => {
+  const getFilteredPurchases = async () => {
     if (!dateRange?.from) {
         toast({ variant: "destructive", title: "Please select a start date." });
         return null;
     }
     
+    const allPurchases = await getPurchases(userId);
     const from = dateRange.from;
     const to = dateRange.to || dateRange.from;
     to.setHours(23, 59, 59, 999);
-    return purchases.filter(p => {
+    return allPurchases.filter(p => {
       const pDate = new Date(p.date);
       return pDate >= from && pDate <= to;
     });
   }
 
-  const handleDownloadPdf = () => {
-    const filteredPurchases = getFilteredPurchases();
-    if (!filteredPurchases) return;
+  const handleDownloadPdf = async () => {
+    const filteredPurchases = await getFilteredPurchases();
+    if (!filteredPurchases || !authUser) return;
     if (filteredPurchases.length === 0) {
       toast({ title: 'No Purchases Found', description: 'There are no purchases in the selected date range.' });
       return;
     }
     const doc = new jsPDF();
     const dateString = `${format(dateRange!.from!, 'PPP')} - ${format(dateRange!.to! || dateRange!.from!, 'PPP')}`;
-    doc.text(`Purchases Report: ${dateString}`, 14, 15);
+
+    // Left side header
+    doc.setFontSize(16);
+    doc.setFont('helvetica', 'bold');
+    doc.text(authUser.companyName || 'Bookstore', 14, 20);
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.text(authUser.address || '', 14, 26);
+    doc.text(authUser.phone || '', 14, 32);
+
+    // Right side header
+    let yPos = 20;
+    if (authUser.bkashNumber) {
+        doc.text(`Bkash: ${authUser.bkashNumber}`, 200, yPos, { align: 'right' });
+        yPos += 6;
+    }
+    if (authUser.bankInfo) {
+        doc.text(`Bank: ${authUser.bankInfo}`, 200, yPos, { align: 'right' });
+    }
+
+    // Report Title
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Purchases Report', 105, 45, { align: 'center' });
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(100);
+    doc.text(`For the period: ${dateString}`, 105, 51, { align: 'center' });
+    doc.setTextColor(0);
+
     autoTable(doc, {
-      startY: 20,
+      startY: 60,
       head: [['Date', 'Purchase ID', 'Supplier', 'Items', 'Total']],
       body: filteredPurchases.map(p => [
         format(new Date(p.date), 'yyyy-MM-dd'),
@@ -211,8 +249,8 @@ export default function PurchaseManagement() {
     doc.save(`purchases-report-${format(dateRange!.from!, 'yyyy-MM-dd')}.pdf`);
   };
 
-  const handleDownloadCsv = () => {
-    const filteredPurchases = getFilteredPurchases();
+  const handleDownloadCsv = async () => {
+    const filteredPurchases = await getFilteredPurchases();
     if (!filteredPurchases) return;
     if (filteredPurchases.length === 0) {
       toast({ title: 'No Purchases Found', description: 'There are no purchases in the selected date range.' });
@@ -267,16 +305,18 @@ export default function PurchaseManagement() {
                             <DialogTitle>Download Purchase Report</DialogTitle>
                             <DialogDescription>Select a date range to download your purchase data.</DialogDescription>
                         </DialogHeader>
-                         <div className="py-4 flex flex-col items-center gap-4">
-                            <Calendar
-                                initialFocus
-                                mode="range"
-                                defaultMonth={dateRange?.from}
-                                selected={dateRange}
-                                onSelect={setDateRange}
-                                numberOfMonths={1}
-                            />
-                        </div>
+                         <ScrollArea className="max-h-[calc(100vh-20rem)] overflow-y-auto">
+                            <div className="py-4 flex flex-col items-center gap-4">
+                                <Calendar
+                                    initialFocus
+                                    mode="range"
+                                    defaultMonth={dateRange?.from}
+                                    selected={dateRange}
+                                    onSelect={setDateRange}
+                                    numberOfMonths={1}
+                                />
+                            </div>
+                        </ScrollArea>
                         <DialogFooter className="gap-2 sm:justify-center pt-4 border-t">
                             <Button variant="outline" onClick={handleDownloadPdf} disabled={!dateRange?.from}><FileText className="mr-2 h-4 w-4" /> PDF</Button>
                             <Button variant="outline" onClick={handleDownloadCsv} disabled={!dateRange?.from}><FileSpreadsheet className="mr-2 h-4 w-4" /> CSV</Button>
@@ -348,8 +388,8 @@ export default function PurchaseManagement() {
           </DialogHeader>
           <Form {...form}>
             <form onSubmit={form.handleSubmit(onSubmit)} className="flex-1 flex flex-col overflow-hidden">
-              <div className="flex-1 overflow-y-auto pr-4 pl-1">
-                 <div className="space-y-4">
+            <div className="flex-1 overflow-y-auto pr-4 pl-1 -mr-4 -ml-1 py-4">
+                 <div className="space-y-4 px-4">
                     <FormField
                         control={form.control}
                         name="supplier"
@@ -366,89 +406,87 @@ export default function PurchaseManagement() {
                     <Separator />
                     
                     <FormLabel>Items</FormLabel>
-                    <ScrollArea className="h-48">
-                        <div className="space-y-3 pr-6">
-                            {fields.map((field, index) => (
-                            <div key={field.id} className="flex gap-2 items-start p-3 border rounded-md relative">
-                                <div className="flex-1 grid grid-cols-1 md:grid-cols-5 gap-3">
-                                    <FormField
-                                        control={form.control}
-                                        name={`items.${index}.itemName`}
-                                        render={({ field }) => (
-                                        <FormItem className="md:col-span-2">
-                                            <FormLabel className="text-xs">Item Name</FormLabel>
-                                            <FormControl><Input placeholder="e.g., The Midnight Library" {...field} /></FormControl>
-                                            <FormMessage />
-                                        </FormItem>
-                                        )}
-                                    />
-                                    <FormField
-                                        control={form.control}
-                                        name={`items.${index}.category`}
-                                        render={({ field }) => (
-                                        <FormItem>
-                                            <FormLabel className="text-xs">Category</FormLabel>
-                                            <Select onValueChange={field.onChange} defaultValue={field.value}>
-                                            <FormControl><SelectTrigger><SelectValue placeholder="Select" /></SelectTrigger></FormControl>
-                                            <SelectContent>
-                                                <SelectItem value="Book">Book</SelectItem>
-                                                <SelectItem value="Office Asset">Office Asset</SelectItem>
-                                            </SelectContent>
-                                            </Select>
-                                            <FormMessage />
-                                        </FormItem>
-                                        )}
-                                    />
-                                    {watchItems[index]?.category === 'Book' && (
-                                        <FormField
-                                            control={form.control}
-                                            name={`items.${index}.author`}
-                                            render={({ field }) => (
-                                            <FormItem>
-                                                <FormLabel className="text-xs">Author</FormLabel>
-                                                <FormControl><Input placeholder="e.g., Matt Haig" {...field} /></FormControl>
-                                                <FormMessage />
-                                            </FormItem>
-                                            )}
-                                    />
+                    <div className="space-y-3 pr-2">
+                        {fields.map((field, index) => (
+                        <div key={field.id} className="flex gap-2 items-start p-3 border rounded-md relative">
+                            <div className="flex-1 grid grid-cols-1 md:grid-cols-5 gap-3">
+                                <FormField
+                                    control={form.control}
+                                    name={`items.${index}.itemName`}
+                                    render={({ field }) => (
+                                    <FormItem className="md:col-span-2">
+                                        <FormLabel className="text-xs">Item Name</FormLabel>
+                                        <FormControl><Input placeholder="e.g., The Midnight Library" {...field} /></FormControl>
+                                        <FormMessage />
+                                    </FormItem>
                                     )}
+                                />
+                                <FormField
+                                    control={form.control}
+                                    name={`items.${index}.category`}
+                                    render={({ field }) => (
+                                    <FormItem>
+                                        <FormLabel className="text-xs">Category</FormLabel>
+                                        <Select onValueChange={field.onChange} defaultValue={field.value}>
+                                        <FormControl><SelectTrigger><SelectValue placeholder="Select" /></SelectTrigger></FormControl>
+                                        <SelectContent>
+                                            <SelectItem value="Book">Book</SelectItem>
+                                            <SelectItem value="Office Asset">Office Asset</SelectItem>
+                                        </SelectContent>
+                                        </Select>
+                                        <FormMessage />
+                                    </FormItem>
+                                    )}
+                                />
+                                {watchItems[index]?.category === 'Book' && (
                                     <FormField
                                         control={form.control}
-                                        name={`items.${index}.quantity`}
+                                        name={`items.${index}.author`}
                                         render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel className="text-xs">Qty</FormLabel>
-                                            <FormControl><Input type="number" min="1" placeholder="1" {...field} /></FormControl>
+                                            <FormLabel className="text-xs">Author</FormLabel>
+                                            <FormControl><Input placeholder="e.g., Matt Haig" {...field} /></FormControl>
                                             <FormMessage />
                                         </FormItem>
                                         )}
-                                    />
-                                    <FormField
-                                        control={form.control}
-                                        name={`items.${index}.cost`}
-                                        render={({ field }) => (
-                                        <FormItem className={watchItems[index]?.category !== 'Book' ? 'md:col-start-4' : ''}>
-                                            <FormLabel className="text-xs">Unit Cost</FormLabel>
-                                            <FormControl><Input type="number" step="0.01" placeholder="0.00" {...field} /></FormControl>
-                                            <FormMessage />
-                                        </FormItem>
-                                        )}
-                                    />
-                                </div>
-                                <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon"
-                                className="text-destructive hover:bg-destructive/10 mt-6"
-                                onClick={() => remove(index)}
-                                disabled={fields.length === 1}
-                                >
-                                <Trash2 className="h-4 w-4" />
-                                </Button>
+                                />
+                                )}
+                                <FormField
+                                    control={form.control}
+                                    name={`items.${index}.quantity`}
+                                    render={({ field }) => (
+                                    <FormItem>
+                                        <FormLabel className="text-xs">Qty</FormLabel>
+                                        <FormControl><Input type="number" min="1" placeholder="1" {...field} /></FormControl>
+                                        <FormMessage />
+                                    </FormItem>
+                                    )}
+                                />
+                                <FormField
+                                    control={form.control}
+                                    name={`items.${index}.cost`}
+                                    render={({ field }) => (
+                                    <FormItem className={watchItems[index]?.category !== 'Book' ? 'md:col-start-4' : ''}>
+                                        <FormLabel className="text-xs">Unit Cost</FormLabel>
+                                        <FormControl><Input type="number" step="0.01" placeholder="0.00" {...field} /></FormControl>
+                                        <FormMessage />
+                                    </FormItem>
+                                    )}
+                                />
                             </div>
-                            ))}
+                            <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="text-destructive hover:bg-destructive/10 mt-6"
+                            onClick={() => remove(index)}
+                            disabled={fields.length === 1}
+                            >
+                            <Trash2 className="h-4 w-4" />
+                            </Button>
                         </div>
-                    </ScrollArea>
+                        ))}
+                    </div>
                     <Button
                     type="button"
                     variant="outline"
@@ -554,7 +592,7 @@ export default function PurchaseManagement() {
                 </div>
               </div>
               
-              <div className="mt-auto pt-4 space-y-4 border-t px-4">
+              <div className="mt-auto pt-4 space-y-4 border-t px-6 pb-6">
                   <div className="space-y-2 text-sm">
                       <div className="flex justify-between font-bold text-base">
                           <span>Total Amount</span>

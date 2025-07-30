@@ -5,11 +5,13 @@ import { auth, db } from '@/lib/firebase';
 import { signOut as firebaseSignOut, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, type User } from 'firebase/auth';
 import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import * as React from 'react';
+import { initializeNewUser } from '@/lib/db/database';
+import type { AuthUser } from '@/lib/types';
 
 interface AuthContextType {
   user: User | null;
+  authUser: AuthUser | null;
   loading: boolean;
-  isApproved: boolean;
   signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
 }
@@ -18,8 +20,8 @@ const AuthContext = React.createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = React.useState<User | null>(null);
+  const [authUser, setAuthUser] = React.useState<AuthUser | null>(null);
   const [loading, setLoading] = React.useState(true);
-  const [isApproved, setIsApproved] = React.useState(false);
 
   React.useEffect(() => {
     if (!auth || !db) {
@@ -28,29 +30,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      if (user) {
-        setUser(user);
-        const userRef = doc(db!, 'users', user.uid);
-        const docSnap = await getDoc(userRef);
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      if (currentUser) {
+        const userRef = doc(db, 'users', currentUser.uid);
+        const userSnap = await getDoc(userRef);
 
-        if (docSnap.exists()) {
-          setIsApproved(docSnap.data().isApproved === true);
+        if (userSnap.exists()) {
+          const userData = userSnap.data() as AuthUser;
+          setAuthUser(userData);
+          setUser(currentUser);
         } else {
-          // New user, create their document
+          // New user, create their document and initialize their data
           await setDoc(userRef, {
-            uid: user.uid,
-            email: user.email,
-            displayName: user.displayName,
-            photoURL: user.photoURL,
-            isApproved: false, // Default to not approved
+            uid: currentUser.uid,
+            email: currentUser.email,
+            displayName: currentUser.displayName,
+            photoURL: currentUser.photoURL,
             createdAt: serverTimestamp(),
+            onboardingComplete: false,
           });
-          setIsApproved(false);
+          await initializeNewUser(currentUser.uid);
+          const newUserSnap = await getDoc(userRef);
+          if (newUserSnap.exists()) {
+            setAuthUser(newUserSnap.data() as AuthUser);
+          }
+          setUser(currentUser);
         }
       } else {
         setUser(null);
-        setIsApproved(false);
+        setAuthUser(null);
       }
       setLoading(false);
     });
@@ -82,9 +90,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const value = { user, loading, isApproved, signInWithGoogle, signOut };
+  const value = { user, authUser, loading, signInWithGoogle, signOut };
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+    </AuthContext.Provider>
+  );
 }
 
 export const useAuth = (): AuthContextType => {

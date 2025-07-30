@@ -17,8 +17,14 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { useToast } from '@/hooks/use-toast';
 import { getCustomersWithDueBalancePaginated, getCustomersWithDueBalance } from '@/lib/actions';
 import { Skeleton } from './ui/skeleton';
+import { useAuth } from '@/hooks/use-auth';
 
-export default function ReceivablesManagement() {
+interface ReceivablesManagementProps {
+    userId: string;
+}
+
+export default function ReceivablesManagement({ userId }: ReceivablesManagementProps) {
+  const { authUser } = useAuth();
   const [customers, setCustomers] = React.useState<CustomerWithDue[]>([]);
   const [hasMore, setHasMore] = React.useState(true);
   const [isInitialLoading, setIsInitialLoading] = React.useState(true);
@@ -27,15 +33,17 @@ export default function ReceivablesManagement() {
   
   const loadInitialData = React.useCallback(async () => {
     setIsInitialLoading(true);
-    const { customersWithDue, hasMore } = await getCustomersWithDueBalancePaginated({ pageLimit: 5 });
+    const { customersWithDue, hasMore } = await getCustomersWithDueBalancePaginated({ userId, pageLimit: 5 });
     setCustomers(customersWithDue);
     setHasMore(hasMore);
     setIsInitialLoading(false);
-  }, []);
+  }, [userId]);
 
   React.useEffect(() => {
-    loadInitialData();
-  }, [loadInitialData]);
+    if (userId) {
+        loadInitialData();
+    }
+  }, [userId, loadInitialData]);
 
   const handleLoadMore = async () => {
     if (!hasMore || isLoadingMore) return;
@@ -48,7 +56,7 @@ export default function ReceivablesManagement() {
         dueBalance: lastCustomer.dueBalance,
     };
 
-    const { customersWithDue: newCustomers, hasMore: newHasMore } = await getCustomersWithDueBalancePaginated({ pageLimit: 5, lastVisible });
+    const { customersWithDue: newCustomers, hasMore: newHasMore } = await getCustomersWithDueBalancePaginated({ userId, pageLimit: 5, lastVisible });
     setCustomers(prev => [...prev, ...newCustomers]);
     setHasMore(newHasMore);
     setIsLoadingMore(false);
@@ -56,9 +64,9 @@ export default function ReceivablesManagement() {
 
   const handleDownload = async (formatType: 'pdf' | 'csv') => {
     // For reports, we fetch all customers with due balance
-    const allCustomersWithDue = await getCustomersWithDueBalance();
+    const allCustomersWithDue = await getCustomersWithDueBalance(userId);
 
-    if (allCustomersWithDue.length === 0) {
+    if (allCustomersWithDue.length === 0 || !authUser) {
       toast({
         variant: 'destructive',
         title: 'No Data',
@@ -76,10 +84,39 @@ export default function ReceivablesManagement() {
 
     if (formatType === 'pdf') {
       const doc = new jsPDF();
-      doc.text('Pending Receivables Report', 14, 15);
-      doc.text(`As of ${format(new Date(), 'PPP')}`, 14, 22);
+      const dateString = format(new Date(), 'PPP');
+
+      // Left side header
+      doc.setFontSize(16);
+      doc.setFont('helvetica', 'bold');
+      doc.text(authUser.companyName || 'Bookstore', 14, 20);
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'normal');
+      doc.text(authUser.address || '', 14, 26);
+      doc.text(authUser.phone || '', 14, 32);
+
+      // Right side header
+      let yPos = 20;
+      if (authUser.bkashNumber) {
+          doc.text(`Bkash: ${authUser.bkashNumber}`, 200, yPos, { align: 'right' });
+          yPos += 6;
+      }
+      if (authUser.bankInfo) {
+          doc.text(`Bank: ${authUser.bankInfo}`, 200, yPos, { align: 'right' });
+      }
+
+      // Report Title
+      doc.setFontSize(14);
+      doc.setFont('helvetica', 'bold');
+      doc.text('Pending Receivables Report', 105, 45, { align: 'center' });
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(100);
+      doc.text(`As of ${dateString}`, 105, 51, { align: 'center' });
+      doc.setTextColor(0);
+
       autoTable(doc, {
-        startY: 30,
+        startY: 60,
         head: [['Customer', 'Phone', 'Due Amount']],
         body: body.map(row => Object.values(row)),
       });
@@ -105,7 +142,7 @@ export default function ReceivablesManagement() {
               <CardDescription>A list of all customers with an outstanding balance.</CardDescription>
             </div>
             <div className="flex flex-col gap-2 items-end">
-                <ReceivePaymentDialog>
+                <ReceivePaymentDialog userId={userId}>
                     <Button>
                         <DollarSign className="mr-2 h-4 w-4" /> Receive Payment
                     </Button>

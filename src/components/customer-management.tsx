@@ -43,6 +43,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { useToast } from '@/hooks/use-toast';
 import { Textarea } from './ui/textarea';
 import { Skeleton } from './ui/skeleton';
+import { useAuth } from '@/hooks/use-auth';
+import { format } from 'date-fns';
 
 const customerSchema = z.object({
   name: z.string().min(1, 'Name is required'),
@@ -54,7 +56,12 @@ const customerSchema = z.object({
 
 type CustomerFormValues = z.infer<typeof customerSchema>;
 
-export default function CustomerManagement() {
+interface CustomerManagementProps {
+    userId: string;
+}
+
+export default function CustomerManagement({ userId }: CustomerManagementProps) {
+  const { authUser } = useAuth();
   const [customers, setCustomers] = React.useState<Customer[]>([]);
   const [hasMore, setHasMore] = React.useState(true);
   const [isInitialLoading, setIsInitialLoading] = React.useState(true);
@@ -67,7 +74,7 @@ export default function CustomerManagement() {
   const loadInitialCustomers = React.useCallback(async () => {
       setIsInitialLoading(true);
       try {
-        const { customers: refreshedCustomers, hasMore: refreshedHasMore } = await getCustomersPaginated({ pageLimit: 5 });
+        const { customers: refreshedCustomers, hasMore: refreshedHasMore } = await getCustomersPaginated({ userId, pageLimit: 5 });
         setCustomers(refreshedCustomers);
         setHasMore(refreshedHasMore);
       } catch (error) {
@@ -80,18 +87,20 @@ export default function CustomerManagement() {
       } finally {
         setIsInitialLoading(false);
       }
-  }, [toast]);
+  }, [userId, toast]);
 
   React.useEffect(() => {
-    loadInitialCustomers();
-  }, [loadInitialCustomers]);
+    if(userId) {
+        loadInitialCustomers();
+    }
+  }, [userId, loadInitialCustomers]);
 
   const handleLoadMore = async () => {
     if (!hasMore || isLoadingMore) return;
     setIsLoadingMore(true);
     const lastCustomerId = customers[customers.length - 1]?.id;
     try {
-        const { customers: newCustomers, hasMore: newHasMore } = await getCustomersPaginated({ pageLimit: 5, lastVisibleId: lastCustomerId });
+        const { customers: newCustomers, hasMore: newHasMore } = await getCustomersPaginated({ userId, pageLimit: 5, lastVisibleId: lastCustomerId });
         setCustomers(prev => [...prev, ...newCustomers]);
         setHasMore(newHasMore);
     } catch (error) {
@@ -132,7 +141,7 @@ export default function CustomerManagement() {
   const handleDelete = (id: string) => {
     startTransition(async () => {
         try {
-            await deleteCustomer(id);
+            await deleteCustomer(userId, id);
             await loadInitialCustomers();
             toast({ title: "Customer Deleted", description: "The customer has been removed." });
         } catch(e) {
@@ -145,10 +154,10 @@ export default function CustomerManagement() {
     startTransition(async () => {
         try {
             if (editingCustomer) {
-                await updateCustomer(editingCustomer.id, data);
+                await updateCustomer(userId, editingCustomer.id, data);
                 toast({ title: "Customer Updated", description: "The customer details have been saved." });
             } else {
-                await addCustomer(data);
+                await addCustomer(userId, data);
                 toast({ title: "Customer Added", description: "The new customer has been added." });
             }
             await loadInitialCustomers();
@@ -161,18 +170,47 @@ export default function CustomerManagement() {
   };
 
   const handleDownloadPdf = () => {
-    if (!customers.length) return;
+    if (!customers.length || !authUser) return;
     
     const doc = new jsPDF();
-    doc.text(`Customer List (Visible)`, 14, 15);
+    const dateString = format(new Date(), 'PPP');
+    
+    // Left side header
+    doc.setFontSize(16);
+    doc.setFont('helvetica', 'bold');
+    doc.text(authUser.companyName || 'Bookstore', 14, 20);
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.text(authUser.address || '', 14, 26);
+    doc.text(authUser.phone || '', 14, 32);
+
+    // Right side header
+    let yPos = 20;
+    if (authUser.bkashNumber) {
+        doc.text(`Bkash: ${authUser.bkashNumber}`, 200, yPos, { align: 'right' });
+        yPos += 6;
+    }
+    if (authUser.bankInfo) {
+        doc.text(`Bank: ${authUser.bankInfo}`, 200, yPos, { align: 'right' });
+    }
+
+    // Report Title
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Customer List', 105, 45, { align: 'center' });
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(100);
+    doc.text(`As of ${dateString}`, 105, 51, { align: 'center' });
+    doc.setTextColor(0);
     
     autoTable(doc, {
-      startY: 20,
+      startY: 60,
       head: [['Name', 'Phone', 'Address', 'Due Balance']],
       body: customers.map(c => [c.name, c.phone, c.address, `$${(c.dueBalance || 0).toFixed(2)}`]),
     });
     
-    doc.save(`customer-list.pdf`);
+    doc.save(`customer-list-${format(new Date(), 'yyyy-MM-dd')}.pdf`);
   };
 
   const handleDownloadCsv = () => {

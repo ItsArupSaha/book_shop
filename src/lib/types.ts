@@ -7,6 +7,14 @@ export type AuthUser = {
   photoURL: string | null;
   isApproved: boolean;
   createdAt: any; // Firestore Timestamp
+  
+  // Onboarding fields
+  companyName?: string;
+  address?: string;
+  phone?: string;
+  bkashNumber?: string;
+  bankInfo?: string;
+  onboardingComplete?: boolean;
 };
 
 export type Customer = {
@@ -44,6 +52,7 @@ export type SaleItem = {
 
 export type Sale = {
   id: string;
+  saleId: string; // The auto-generated ID like SALE-0001
   date: string; // Changed to string for serialization
   customerId: string;
   items: SaleItem[];
@@ -53,6 +62,7 @@ export type Sale = {
   total: number;
   paymentMethod: 'Cash' | 'Bank' | 'Due' | 'Split';
   amountPaid?: number;
+  splitPaymentMethod?: 'Cash' | 'Bank';
 };
 
 export type PurchaseItem = {
@@ -107,4 +117,5 @@ export type Transaction = {
 // Metadata for counters, etc.
 export type Metadata = {
   lastPurchaseNumber: number;
+  lastSaleNumber: number;
 }

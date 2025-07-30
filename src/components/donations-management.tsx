@@ -1,4 +1,3 @@
-
 'use client';
 
 import * as React from 'react';
@@ -7,7 +6,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
 import { PlusCircle, Download, FileText, FileSpreadsheet, Loader2 } from 'lucide-react';
 import { format } from 'date-fns';
-import { addDonation, getDonationsPaginated } from '@/lib/actions';
+import { addDonation, getDonationsPaginated, getDonations } from '@/lib/actions';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import Papa from 'papaparse';
@@ -29,6 +28,7 @@ import { Textarea } from './ui/textarea';
 import { ScrollArea } from './ui/scroll-area';
 import { Skeleton } from './ui/skeleton';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { useAuth } from '@/hooks/use-auth';
 
 const donationSchema = z.object({
   donorName: z.string().min(1, 'Donor name is required'),
@@ -40,7 +40,12 @@ const donationSchema = z.object({
 
 type DonationFormValues = z.infer<typeof donationSchema>;
 
-export default function DonationsManagement() {
+interface DonationsManagementProps {
+    userId: string;
+}
+
+export default function DonationsManagement({ userId }: DonationsManagementProps) {
+  const { authUser } = useAuth();
   const [donations, setDonations] = React.useState<Donation[]>([]);
   const [hasMore, setHasMore] = React.useState(true);
   const [isInitialLoading, setIsInitialLoading] = React.useState(true);
@@ -53,21 +58,23 @@ export default function DonationsManagement() {
   
   const loadInitialData = React.useCallback(async () => {
     setIsInitialLoading(true);
-    const { donations: newDonations, hasMore: newHasMore } = await getDonationsPaginated({ pageLimit: 5 });
+    const { donations: newDonations, hasMore: newHasMore } = await getDonationsPaginated({ userId, pageLimit: 5 });
     setDonations(newDonations);
     setHasMore(newHasMore);
     setIsInitialLoading(false);
-  }, []);
+  }, [userId]);
 
   React.useEffect(() => {
-    loadInitialData();
-  }, [loadInitialData]);
+    if(userId) {
+        loadInitialData();
+    }
+  }, [userId, loadInitialData]);
 
   const handleLoadMore = async () => {
     if (!hasMore || isLoadingMore) return;
     setIsLoadingMore(true);
     const lastDonationId = donations[donations.length - 1]?.id;
-    const { donations: newDonations, hasMore: newHasMore } = await getDonationsPaginated({ pageLimit: 5, lastVisibleId: lastDonationId });
+    const { donations: newDonations, hasMore: newHasMore } = await getDonationsPaginated({ userId, pageLimit: 5, lastVisibleId: lastDonationId });
     setDonations(prev => [...prev, ...newDonations]);
     setHasMore(newHasMore);
     setIsLoadingMore(false);
@@ -90,14 +97,14 @@ export default function DonationsManagement() {
 
   const onSubmit = (data: DonationFormValues) => {
     startTransition(async () => {
-        const newDonation = await addDonation(data);
+        const newDonation = await addDonation(userId, data);
         setDonations(prev => [newDonation, ...prev]);
         toast({ title: 'Donation Added', description: 'The new donation has been recorded.' });
         setIsDialogOpen(false);
     });
   };
 
-  const getFilteredDonations = () => {
+  const getFilteredDonations = async () => {
     if (!dateRange?.from) {
         toast({
             variant: "destructive",
@@ -106,19 +113,20 @@ export default function DonationsManagement() {
         return null;
     }
     
+    const allDonations = await getDonations(userId);
     const from = dateRange.from;
     const to = dateRange.to || dateRange.from;
     to.setHours(23, 59, 59, 999);
 
-    return donations.filter(donation => {
+    return allDonations.filter(donation => {
       const donationDate = new Date(donation.date);
       return donationDate >= from && donationDate <= to;
     });
   }
 
-  const handleDownloadPdf = () => {
-    const filteredDonations = getFilteredDonations();
-    if (!filteredDonations) return;
+  const handleDownloadPdf = async () => {
+    const filteredDonations = await getFilteredDonations();
+    if (!filteredDonations || !authUser) return;
 
     if (filteredDonations.length === 0) {
       toast({ title: 'No Donations Found', description: 'There are no donations in the selected date range.' });
@@ -129,10 +137,37 @@ export default function DonationsManagement() {
     const dateString = `${format(dateRange!.from!, 'PPP')} - ${format(dateRange!.to! || dateRange!.from!, 'PPP')}`;
     const totalDonations = filteredDonations.reduce((sum, d) => sum + d.amount, 0);
 
-    doc.text(`Donations Report: ${dateString}`, 14, 15);
+    // Left side header
+    doc.setFontSize(16);
+    doc.setFont('helvetica', 'bold');
+    doc.text(authUser.companyName || 'Bookstore', 14, 20);
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.text(authUser.address || '', 14, 26);
+    doc.text(authUser.phone || '', 14, 32);
+
+    // Right side header
+    let yPos = 20;
+    if (authUser.bkashNumber) {
+        doc.text(`Bkash: ${authUser.bkashNumber}`, 200, yPos, { align: 'right' });
+        yPos += 6;
+    }
+    if (authUser.bankInfo) {
+        doc.text(`Bank: ${authUser.bankInfo}`, 200, yPos, { align: 'right' });
+    }
+
+    // Report Title
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Donations Report', 105, 45, { align: 'center' });
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(100);
+    doc.text(`For the period: ${dateString}`, 105, 51, { align: 'center' });
+    doc.setTextColor(0);
     
     autoTable(doc, {
-      startY: 20,
+      startY: 60,
       head: [['Date', 'Donor', 'Method', 'Notes', 'Amount']],
       body: filteredDonations.map(d => [
         format(new Date(d.date), 'yyyy-MM-dd'),
@@ -144,14 +179,14 @@ export default function DonationsManagement() {
       foot: [
         [{ content: 'Total', colSpan: 4, styles: { halign: 'right' } }, `$${totalDonations.toFixed(2)}`],
       ],
-      footStyles: { fontStyle: 'bold', fillColor: [240, 240, 240] },
+      footStyles: { fontStyle: 'bold', fillColor: [240, 240, 240], textColor: [0, 0, 0] },
     });
     
     doc.save(`donations-report-${format(dateRange!.from!, 'yyyy-MM-dd')}-to-${format(dateRange!.to! || dateRange!.from!, 'yyyy-MM-dd')}.pdf`);
   };
 
-  const handleDownloadCsv = () => {
-    const filteredDonations = getFilteredDonations();
+  const handleDownloadCsv = async () => {
+    const filteredDonations = await getFilteredDonations();
     if (!filteredDonations) return;
 
     if (filteredDonations.length === 0) {
@@ -399,5 +434,3 @@ export default function DonationsManagement() {
     </Card>
   );
 }
-
-    

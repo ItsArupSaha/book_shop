@@ -10,9 +10,9 @@ import { format } from 'date-fns';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import Papa from 'papaparse';
-import { getSalesPaginated, getBooks, getCustomers, addSale } from '@/lib/actions';
+import { getSalesPaginated, getBooks, getCustomers, addSale, getSales } from '@/lib/actions';
 
-import type { Sale, Book, Customer } from '@/lib/types';
+import type { Sale, Book, Customer, AuthUser } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
@@ -32,6 +32,7 @@ import { SaleMemo } from './sale-memo';
 import { ScrollArea } from './ui/scroll-area';
 import { DownloadSaleMemo } from './download-sale-memo';
 import { Skeleton } from './ui/skeleton';
+import { useAuth } from '@/hooks/use-auth';
 
 const saleItemSchema = z.object({
   bookId: z.string().min(1, 'Book is required'),
@@ -46,6 +47,7 @@ const saleFormSchema = z.object({
   discountValue: z.coerce.number().min(0, 'Discount must be non-negative').default(0),
   paymentMethod: z.enum(['Cash', 'Bank', 'Due', 'Split'], { required_error: 'Payment method is required.'}),
   amountPaid: z.coerce.number().optional(),
+  splitPaymentMethod: z.enum(['Cash', 'Bank']).optional(),
 }).refine(data => {
     if (data.discountType === 'percentage') {
         return data.discountValue >= 0 && data.discountValue <= 100;
@@ -56,17 +58,22 @@ const saleFormSchema = z.object({
     path: ['discountValue'],
 }).refine(data => {
     if (data.paymentMethod === 'Split') {
-        return data.amountPaid !== undefined && data.amountPaid > 0;
+        return data.amountPaid !== undefined && data.amountPaid > 0 && !!data.splitPaymentMethod;
     }
     return true;
 }, {
-    message: "Amount paid is required for split payments.",
+    message: "Amount paid and its method are required for split payments.",
     path: ['amountPaid'],
 });
 
 type SaleFormValues = z.infer<typeof saleFormSchema>;
 
-export default function SalesManagement() {
+interface SalesManagementProps {
+    userId: string;
+}
+
+export default function SalesManagement({ userId }: SalesManagementProps) {
+  const { authUser } = useAuth();
   const [sales, setSales] = React.useState<Sale[]>([]);
   const [books, setBooks] = React.useState<Book[]>([]);
   const [customers, setCustomers] = React.useState<Customer[]>([]);
@@ -84,9 +91,9 @@ export default function SalesManagement() {
     setIsInitialLoading(true);
     try {
         const [{ sales: newSales, hasMore: newHasMore }, booksData, customersData] = await Promise.all([
-            getSalesPaginated({ pageLimit: 5 }),
-            getBooks(),
-            getCustomers(),
+            getSalesPaginated({ userId, pageLimit: 5 }),
+            getBooks(userId),
+            getCustomers(userId),
         ]);
         setSales(newSales);
         setHasMore(newHasMore);
@@ -102,11 +109,13 @@ export default function SalesManagement() {
     } finally {
         setIsInitialLoading(false);
     }
-}, [toast]);
+}, [userId, toast]);
 
   React.useEffect(() => {
-    loadInitialData();
-  }, [loadInitialData]);
+    if(userId) {
+        loadInitialData();
+    }
+  }, [userId, loadInitialData]);
 
 
   const getBookTitle = (bookId: string) => books.find(b => b.id === bookId)?.title || 'Unknown Book';
@@ -117,7 +126,7 @@ export default function SalesManagement() {
     setIsLoadingMore(true);
     const lastSaleId = sales[sales.length - 1]?.id;
     try {
-        const { sales: newSales, hasMore: newHasMore } = await getSalesPaginated({ pageLimit: 5, lastVisibleId: lastSaleId });
+        const { sales: newSales, hasMore: newHasMore } = await getSalesPaginated({ userId, pageLimit: 5, lastVisibleId: lastSaleId });
         setSales(prev => [...prev, ...newSales]);
         setHasMore(newHasMore);
     } catch(e) {
@@ -140,6 +149,7 @@ export default function SalesManagement() {
       discountValue: 0,
       paymentMethod: 'Cash',
       amountPaid: 0,
+      splitPaymentMethod: 'Cash',
     },
   });
 
@@ -186,6 +196,7 @@ export default function SalesManagement() {
       discountValue: 0,
       paymentMethod: 'Cash',
       amountPaid: 0,
+      splitPaymentMethod: 'Cash',
     });
     setCompletedSale(null);
     setIsDialogOpen(true);
@@ -200,22 +211,35 @@ export default function SalesManagement() {
 
   const onSubmit = (data: SaleFormValues) => {
     startTransition(async () => {
-      const result = await addSale(data);
+      const result = await addSale(userId, data);
 
       if (result?.success && result.sale) {
         toast({ title: 'Sale Recorded', description: 'The new sale has been added to the history.' });
-        // Instead of refetching all, just add the new sale to the top.
-        setSales(prev => [result.sale!, ...prev]);
-        const updatedBooks = await getBooks();
+        
+        const newSale = result.sale;
+
+        // Add the newly created sale to the local state to avoid a full refresh
+        setSales(prev => [newSale, ...prev]);
+
+        // Update local book stock
+        const updatedBooks = books.map(book => {
+            const soldItem = newSale.items.find(item => item.bookId === book.id);
+            if (soldItem) {
+                return { ...book, stock: book.stock - soldItem.quantity };
+            }
+            return book;
+        });
         setBooks(updatedBooks);
-        setCompletedSale(result.sale);
+
+        setCompletedSale(newSale);
+
       } else {
         toast({ variant: 'destructive', title: 'Error', description: result.error || 'Failed to record sale.' });
       }
     });
   };
 
-  const getFilteredSales = () => {
+  const getFilteredSales = async () => {
     if (!dateRange?.from) {
         toast({
             variant: "destructive",
@@ -224,19 +248,20 @@ export default function SalesManagement() {
         return null;
     }
     
+    const allSales = await getSales(userId);
     const from = dateRange.from;
     const to = dateRange.to || dateRange.from;
     to.setHours(23, 59, 59, 999);
 
-    return sales.filter(sale => {
+    return allSales.filter(sale => {
       const saleDate = new Date(sale.date);
       return saleDate >= from && saleDate <= to;
     });
   }
   
-  const handleDownloadPdf = () => {
-    const filteredSales = getFilteredSales();
-    if (!filteredSales) return;
+  const handleDownloadPdf = async () => {
+    const filteredSales = await getFilteredSales();
+    if (!filteredSales || !authUser) return;
 
     if (filteredSales.length === 0) {
       toast({ title: 'No Sales Found', description: 'There are no sales in the selected date range.' });
@@ -245,13 +270,42 @@ export default function SalesManagement() {
 
     const doc = new jsPDF();
     const dateString = `${format(dateRange!.from!, 'PPP')} - ${format(dateRange!.to! || dateRange!.from!, 'PPP')}`;
-    doc.text(`Sales Report: ${dateString}`, 14, 15);
     
+    // Left side header
+    doc.setFontSize(16);
+    doc.setFont('helvetica', 'bold');
+    doc.text(authUser.companyName || 'Bookstore', 14, 20);
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.text(authUser.address || '', 14, 26);
+    doc.text(authUser.phone || '', 14, 32);
+
+    // Right side header
+    let yPos = 20;
+    if (authUser.bkashNumber) {
+        doc.text(`Bkash: ${authUser.bkashNumber}`, 200, yPos, { align: 'right' });
+        yPos += 6;
+    }
+    if (authUser.bankInfo) {
+        doc.text(`Bank: ${authUser.bankInfo}`, 200, yPos, { align: 'right' });
+    }
+    
+    // Report Title
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Sales Report', 105, 45, { align: 'center' });
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(100);
+    doc.text(`For the period: ${dateString}`, 105, 51, { align: 'center' });
+    doc.setTextColor(0);
+
     autoTable(doc, {
-      startY: 20,
-      head: [['Date', 'Customer', 'Items', 'Payment', 'Total']],
+      startY: 60,
+      head: [['Date', 'Sale ID', 'Customer', 'Items', 'Payment', 'Total']],
       body: filteredSales.map(sale => [
         format(new Date(sale.date), 'yyyy-MM-dd'),
+        sale.saleId,
         getCustomerName(sale.customerId),
         sale.items.map(i => `${i.quantity}x ${getBookTitle(i.bookId)}`).join(', '),
         sale.paymentMethod,
@@ -262,8 +316,8 @@ export default function SalesManagement() {
     doc.save(`sales-report-${format(dateRange!.from!, 'yyyy-MM-dd')}-to-${format(dateRange!.to! || dateRange!.from!, 'yyyy-MM-dd')}.pdf`);
   };
 
-  const handleDownloadCsv = () => {
-    const filteredSales = getFilteredSales();
+  const handleDownloadCsv = async () => {
+    const filteredSales = await getFilteredSales();
     if (!filteredSales) return;
 
     if (filteredSales.length === 0) {
@@ -273,6 +327,7 @@ export default function SalesManagement() {
 
     const csvData = filteredSales.map(sale => ({
       Date: format(new Date(sale.date), 'yyyy-MM-dd'),
+      'Sale ID': sale.saleId,
       Customer: getCustomerName(sale.customerId),
       Items: sale.items.map(i => `${i.quantity}x ${getBookTitle(i.bookId)}`).join('; '),
       'Payment Method': sale.paymentMethod,
@@ -359,6 +414,7 @@ export default function SalesManagement() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Date</TableHead>
+                  <TableHead>Sale ID</TableHead>
                   <TableHead>Customer</TableHead>
                   <TableHead>Items</TableHead>
                   <TableHead>Payment</TableHead>
@@ -376,6 +432,7 @@ export default function SalesManagement() {
                             <TableCell><Skeleton className="h-5 w-1/4" /></TableCell>
                             <TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell>
                             <TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell>
+                            <TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell>
                         </TableRow>
                     ))
                 ) : sales.length > 0 ? sales.map((sale) => {
@@ -383,6 +440,7 @@ export default function SalesManagement() {
                   return (
                     <TableRow key={sale.id}>
                       <TableCell>{format(new Date(sale.date), 'PPP')}</TableCell>
+                      <TableCell className="font-mono">{sale.saleId}</TableCell>
                       <TableCell className="font-medium">{customer?.name || 'Unknown Customer'}</TableCell>
                       <TableCell className="max-w-[300px]">
                         {sale.items.length > 0 && (
@@ -403,15 +461,15 @@ export default function SalesManagement() {
                       <TableCell>{sale.paymentMethod}</TableCell>
                       <TableCell className="text-right font-medium">${sale.total.toFixed(2)}</TableCell>
                       <TableCell className="text-right">
-                        {customer && (
-                          <DownloadSaleMemo sale={sale} customer={customer} books={books} />
+                        {customer && authUser && (
+                          <DownloadSaleMemo sale={sale} customer={customer} books={books} user={authUser} />
                         )}
                       </TableCell>
                     </TableRow>
                   )
                 }) : (
                   <TableRow>
-                    <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">No sales recorded yet.</TableCell>
+                    <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">No sales recorded yet.</TableCell>
                   </TableRow>
                 )}
               </TableBody>
@@ -429,8 +487,8 @@ export default function SalesManagement() {
 
       <Dialog open={isDialogOpen} onOpenChange={handleDialogClose}>
         <DialogContent className="sm:max-w-2xl">
-          {completedSale ? (
-             <SaleMemo sale={completedSale} customer={customers.find(c => c.id === completedSale.customerId)!} books={books} onNewSale={handleAddNew}/>
+          {completedSale && authUser ? (
+             <SaleMemo sale={completedSale} customer={customers.find(c => c.id === completedSale.customerId)!} books={books} onNewSale={handleAddNew} user={authUser}/>
           ) : (
             <>
               <DialogHeader>
@@ -622,19 +680,37 @@ export default function SalesManagement() {
                         />
                     </div>
                      {watchPaymentMethod === 'Split' && (
-                        <FormField
-                            control={form.control}
-                            name="amountPaid"
-                            render={({ field }) => (
-                                <FormItem>
-                                    <FormLabel>Amount Paid Now</FormLabel>
+                        <div className='flex gap-4 items-end'>
+                            <FormField
+                                control={form.control}
+                                name="amountPaid"
+                                render={({ field }) => (
+                                    <FormItem className="flex-1">
+                                        <FormLabel>Amount Paid Now</FormLabel>
+                                        <FormControl>
+                                            <Input type="number" step="0.01" placeholder="Enter amount paid" {...field} />
+                                        </FormControl>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+                            <FormField
+                                control={form.control}
+                                name="splitPaymentMethod"
+                                render={({ field }) => (
+                                    <FormItem className="flex-1 space-y-3">
+                                    <FormLabel>Paid Via</FormLabel>
                                     <FormControl>
-                                        <Input type="number" step="0.01" placeholder="Enter amount paid" {...field} />
+                                        <RadioGroup onValueChange={field.onChange} defaultValue={field.value} className="flex gap-4">
+                                            <FormItem className="flex items-center space-x-2"><FormControl><RadioGroupItem value="Cash" /></FormControl><FormLabel className="font-normal">Cash</FormLabel></FormItem>
+                                            <FormItem className="flex items-center space-x-2"><FormControl><RadioGroupItem value="Bank" /></FormControl><FormLabel className="font-normal">Bank</FormLabel></FormItem>
+                                        </RadioGroup>
                                     </FormControl>
                                     <FormMessage />
-                                </FormItem>
-                            )}
-                        />
+                                    </FormItem>
+                                )}
+                            />
+                        </div>
                     )}
                     <Separator />
                     <div className="space-y-2 text-sm pr-4">
@@ -670,3 +746,5 @@ export default function SalesManagement() {
     </>
   );
 }
+
+    

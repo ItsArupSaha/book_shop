@@ -4,6 +4,7 @@
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table';
+import { useAuth } from '@/hooks/use-auth';
 import type { ReportAnalysis } from '@/lib/report-generator';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -23,19 +24,45 @@ const formatCurrency = (amount: number) => {
 };
 
 export default function ReportPreview({ reportData, month, year }: ReportPreviewProps) {
+  const { authUser } = useAuth();
   const { openingBalances, monthlyActivity, netResult } = reportData;
 
   const handleDownloadPdf = () => {
+    if (!authUser) return;
     const doc = new jsPDF();
+    
+    // Left side header
+    doc.setFontSize(16);
+    doc.setFont('helvetica', 'bold');
+    doc.text(authUser.companyName || 'Bookstore', 14, 20);
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.text(authUser.address || '', 14, 26);
+    doc.text(authUser.phone || '', 14, 32);
 
-    doc.setFontSize(18);
-    doc.text(`Monthly Financial Report`, 105, 20, { align: 'center' });
-    doc.setFontSize(12);
-    doc.text(`${month} ${year}`, 105, 28, { align: 'center' });
+    // Right side header
+    let yPos = 20;
+    if (authUser.bkashNumber) {
+        doc.text(`Bkash: ${authUser.bkashNumber}`, 200, yPos, { align: 'right' });
+        yPos += 6;
+    }
+    if (authUser.bankInfo) {
+        doc.text(`Bank: ${authUser.bankInfo}`, 200, yPos, { align: 'right' });
+    }
+
+    // Report Title
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`Monthly Financial Report`, 105, 45, { align: 'center' });
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(100);
+    doc.text(`${month} ${year}`, 105, 51, { align: 'center' });
+    doc.setTextColor(0);
     
     // Balances Table
     autoTable(doc, {
-      startY: 40,
+      startY: 60,
       head: [['Opening Balances', 'Amount']],
       body: [
         ['Cash', formatCurrency(openingBalances.cash)],
